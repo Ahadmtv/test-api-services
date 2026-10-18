@@ -18,7 +18,15 @@ type Config struct {
 	HTTP    HTTPConfig
 	DB      DBConfig
 	Log     LogConfig
+	Auth    AuthConfig
 	Version string
+}
+
+type AuthConfig struct {
+	AccessTokenSecret  string
+	AccessTokenTTL     time.Duration
+	RefreshTokenTTL    time.Duration
+	RateLimitPerMinute int
 }
 
 type HTTPConfig struct {
@@ -48,22 +56,26 @@ type LogConfig struct {
 }
 
 const (
-	defaultEnv            = "development"
-	defaultVersion        = "0.1.0"
-	defaultHTTPHost       = "0.0.0.0"
-	defaultHTTPPort       = 8080
-	defaultReadTimeout    = 10 * time.Second
-	defaultWriteTimeout   = 10 * time.Second
-	defaultIdleTimeout    = 30 * time.Second
-	defaultDBHost         = "localhost"
-	defaultDBPort         = 5432
-	defaultDBSSLMode      = "disable"
-	defaultDBMaxOpenConns = 25
-	defaultDBMaxIdleConns = 5
-	defaultDBMaxConnIdle  = 10 * time.Minute
-	defaultDBMaxConnLife  = 1 * time.Hour
-	defaultLogLevel       = "info"
-	defaultLogFormat      = "json"
+	defaultEnv                    = "development"
+	defaultVersion                = "0.1.0"
+	defaultHTTPHost               = "0.0.0.0"
+	defaultHTTPPort               = 8080
+	defaultReadTimeout            = 10 * time.Second
+	defaultWriteTimeout           = 10 * time.Second
+	defaultIdleTimeout            = 30 * time.Second
+	defaultDBHost                 = "localhost"
+	defaultDBPort                 = 5432
+	defaultDBSSLMode              = "disable"
+	defaultDBMaxOpenConns         = 25
+	defaultDBMaxIdleConns         = 5
+	defaultDBMaxConnIdle          = 10 * time.Minute
+	defaultDBMaxConnLife          = 1 * time.Hour
+	defaultLogLevel               = "info"
+	defaultLogFormat              = "json"
+	defaultAuthAccessTokenTTL     = 15 * time.Minute
+	defaultAuthRefreshTokenTTL    = 168 * time.Hour
+	defaultAuthRateLimitPerMinute = 30
+	minAuthAccessTokenSecretLen   = 32
 )
 
 // LoadConfig reads configuration from environment variables and validates it.
@@ -113,6 +125,29 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("invalid LOG_LEVEL %q: %w", cfg.Log.Level, err)
 	}
 	_ = level
+
+	cfg.Auth = AuthConfig{
+		AccessTokenSecret:  os.Getenv("AUTH_ACCESS_TOKEN_SECRET"),
+		AccessTokenTTL:     parseDuration(os.Getenv("AUTH_ACCESS_TOKEN_TTL"), defaultAuthAccessTokenTTL, "AUTH_ACCESS_TOKEN_TTL"),
+		RefreshTokenTTL:    parseDuration(os.Getenv("AUTH_REFRESH_TOKEN_TTL"), defaultAuthRefreshTokenTTL, "AUTH_REFRESH_TOKEN_TTL"),
+		RateLimitPerMinute: parseInt(os.Getenv("AUTH_RATE_LIMIT_PER_MIN"), defaultAuthRateLimitPerMinute, "AUTH_RATE_LIMIT_PER_MIN"),
+	}
+
+	if strings.TrimSpace(cfg.Auth.AccessTokenSecret) == "" {
+		return nil, fmt.Errorf("%w: AUTH_ACCESS_TOKEN_SECRET", ErrMissingConfig)
+	}
+	if len(cfg.Auth.AccessTokenSecret) < minAuthAccessTokenSecretLen {
+		return nil, fmt.Errorf("AUTH_ACCESS_TOKEN_SECRET must be at least %d characters", minAuthAccessTokenSecretLen)
+	}
+	if cfg.Auth.AccessTokenTTL <= 0 {
+		return nil, fmt.Errorf("AUTH_ACCESS_TOKEN_TTL must be positive")
+	}
+	if cfg.Auth.RefreshTokenTTL <= 0 {
+		return nil, fmt.Errorf("AUTH_REFRESH_TOKEN_TTL must be positive")
+	}
+	if cfg.Auth.RateLimitPerMinute <= 0 {
+		return nil, fmt.Errorf("AUTH_RATE_LIMIT_PER_MIN must be positive")
+	}
 
 	return cfg, nil
 }

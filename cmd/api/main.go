@@ -11,6 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gofiber/fiber/v3"
+
+	"test-api/internal/auth"
+	"test-api/internal/identity"
 	"test-api/internal/platform"
 )
 
@@ -45,7 +49,42 @@ func run(ctx context.Context, args []string) error {
 		return runMigration(ctx, args[0], db, logger)
 	}
 
+	store := identity.NewPgxStore(db.Pool())
+	service := identity.NewService(identity.Config{
+		Store:             store,
+		PasswordParams:    identity.DefaultParams,
+		AccessTokenSecret: cfg.Auth.AccessTokenSecret,
+		AccessTokenTTL:    cfg.Auth.AccessTokenTTL,
+		RefreshTokenTTL:   cfg.Auth.RefreshTokenTTL,
+		Logger:            logger,
+	})
+
+	rateLimiter := auth.NewRateLimiter(cfg.Auth.RateLimitPerMinute)
+	handler := auth.NewHandler(service, logger, rateLimiter, int64(cfg.Auth.AccessTokenTTL.Seconds()))
+
 	app := platform.NewApp(cfg, logger, db)
+
+	authGroup := app.Fiber().Group("/api/v1/auth")
+	authGroup.Post("/register", handler.Register)
+	authGroup.Post("/login", handler.Login)
+	authGroup.Post("/refresh", handler.Refresh)
+	authGroup.Post("/logout", handler.Logout)
+
+	meGroup := app.Fiber().Group("/api/v1")
+	meGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
+	meGroup.Get("/me", handler.Me)
+
+	// Example role-based route (admin only) — no business logic yet.
+	adminGroup := app.Fiber().Group("/api/v1/admin")
+	adminGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
+	adminGroup.Use(auth.RequireRoles("admin"))
+	adminGroup.Get("/whoami", func(c fiber.Ctx) error {
+		principal := c.Locals(platform.PrincipalKey).(identity.Principal)
+		return c.Status(200).Type("application/json").JSON(map[string]any{
+			"user_id": principal.UserID,
+			"roles":   principal.Roles,
+		})
+	})
 
 	addr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
 	go func() {

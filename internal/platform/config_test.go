@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+var _ = time.Second
+
 func envWith(t *testing.T, vars map[string]string) {
 	t.Helper()
 	for k, v := range vars {
@@ -37,12 +39,13 @@ func TestLoadConfigMissingRequired(t *testing.T) {
 
 func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	envWith(t, map[string]string{
-		"DB_USER":     "tester",
-		"DB_NAME":     "testdb",
-		"DB_PASSWORD": "secret",
-		"HTTP_PORT":   "18080",
-		"LOG_LEVEL":   "debug",
-		"LOG_FORMAT":  "text",
+		"DB_USER":                  "tester",
+		"DB_NAME":                  "testdb",
+		"DB_PASSWORD":              "secret",
+		"HTTP_PORT":                "18080",
+		"LOG_LEVEL":                "debug",
+		"LOG_FORMAT":               "text",
+		"AUTH_ACCESS_TOKEN_SECRET": "01234567890123456789012345678901",
 	})
 
 	cfg, err := LoadConfig()
@@ -99,6 +102,32 @@ func TestLoadConfigMissingOnlyName(t *testing.T) {
 	_, err := LoadConfig()
 	if err == nil || !strings.Contains(err.Error(), "DB_NAME") {
 		t.Errorf("expected DB_NAME missing error, got: %v", err)
+	}
+}
+
+func TestLoadConfigAuthSecretRequired(t *testing.T) {
+	envWith(t, map[string]string{
+		"DB_USER":                  "tester",
+		"DB_NAME":                  "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET": "",
+	})
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "AUTH_ACCESS_TOKEN_SECRET") {
+		t.Errorf("expected AUTH_ACCESS_TOKEN_SECRET error, got: %v", err)
+	}
+}
+
+func TestLoadConfigAuthSecretTooShort(t *testing.T) {
+	envWith(t, map[string]string{
+		"DB_USER":                  "tester",
+		"DB_NAME":                  "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET": "short",
+	})
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "at least") {
+		t.Errorf("expected too-short secret error, got: %v", err)
 	}
 }
 

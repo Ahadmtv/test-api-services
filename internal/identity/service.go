@@ -1,0 +1,264 @@
+package identity
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+)
+
+// Service performs authentication operations.
+type Service struct {
+	store             Store
+	passwordParams    Params
+	accessTokenSecret string
+	accessTokenTTL    time.Duration
+	refreshTokenTTL   time.Duration
+	logger            *slog.Logger
+}
+
+// Config for the identity service.
+type Config struct {
+	Store             Store
+	PasswordParams    Params
+	AccessTokenSecret string
+	AccessTokenTTL    time.Duration
+	RefreshTokenTTL   time.Duration
+	Logger            *slog.Logger
+}
+
+// NewService builds an identity service.
+func NewService(cfg Config) *Service {
+	return &Service{
+		store:             cfg.Store,
+		passwordParams:    cfg.PasswordParams,
+		accessTokenSecret: cfg.AccessTokenSecret,
+		accessTokenTTL:    cfg.AccessTokenTTL,
+		refreshTokenTTL:   cfg.RefreshTokenTTL,
+		logger:            cfg.Logger,
+	}
+}
+
+// Service errors.
+var (
+	ErrUserNotFound         = errors.New("user not found")
+	ErrInvalidCredentials   = errors.New("invalid credentials")
+	ErrUserAlreadyExists    = errors.New("user already exists")
+	ErrRefreshTokenNotFound = errors.New("refresh token not found")
+	ErrRefreshTokenExpired  = errors.New("refresh token expired")
+	ErrRefreshTokenRevoked  = errors.New("refresh token revoked")
+	ErrTokenReplayDetected  = errors.New("token replay detected; all sessions revoked")
+)
+
+// Register creates a new account. The default role "client" is assigned
+// server-side; additional roles (provider, admin) are granted by an
+// administrator, never by self-registration.
+func (s *Service) Register(ctx context.Context, email, phone, password string) (*TokenPair, error) {
+	_, err := s.store.GetUserByEmail(ctx, email)
+	if err == nil {
+		return nil, ErrUserAlreadyExists
+	}
+	if !errors.Is(err, ErrUserNotFound) {
+		return nil, fmt.Errorf("check existing user: %w", err)
+	}
+
+	passwordHash, err := Hash(password, s.passwordParams)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
+
+	var phonePtr *string
+	if phone != "" {
+		phonePtr = &phone
+	}
+
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	userID, err := s.store.CreateUser(ctx, tx, email, phonePtr, passwordHash)
+	if err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+	if err := s.store.AddRole(ctx, tx, userID, "client"); err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, fmt.Errorf("assign default role: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit registration: %w", err)
+	}
+
+	return s.issueTokenPair(ctx, userID, email, []string{"client"})
+}
+
+// Login verifies credentials and issues a token pair. It returns the same
+// generic error for unknown users and wrong passwords to avoid account
+// enumeration.
+func (s *Service) Login(ctx context.Context, email, password string) (*TokenPair, error) {
+	record, err := s.store.GetUserByEmail(ctx, email)
+	if err != nil {
+		// Perform a dummy hash so timing is similar whether or not the user
+		// exists, mitigating enumeration via response timing.
+		if _, err := Hash("x", s.passwordParams); err != nil {
+			return nil, fmt.Errorf("hash dummy: %w", err)
+		}
+		return nil, ErrInvalidCredentials
+	}
+
+	if !record.IsActive {
+		return nil, ErrInvalidCredentials
+	}
+
+	ok, err := Verify(password, record.PasswordHash)
+	if err != nil || !ok {
+		return nil, ErrInvalidCredentials
+	}
+
+	roles := record.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	return s.issueTokenPair(ctx, record.ID, record.Email, roles)
+}
+
+// Refresh rotates a refresh token. The presented plaintext token is hashed and
+// looked up. If found, active, and not revoked, it is revoked and a new
+// access+refresh pair is issued (rotation). If the token was already revoked
+// and has a replacement still active, a replay attack is suspected and every
+// token for the user is revoked.
+func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
+	refreshHash := hashToken(refreshToken)
+
+	row, err := s.store.FindRefreshToken(ctx, refreshHash)
+	if err != nil {
+		// Unknown or revoked token: respond identically to avoid leaking state.
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			return nil, ErrInvalidCredentials
+		}
+		return nil, fmt.Errorf("find refresh token: %w", err)
+	}
+
+	now := time.Now().UTC()
+
+	if row.RevokedAt.Valid {
+		// Token already revoked. Replay detection: if it was replaced by a
+		// token that is still active, revoke all user tokens.
+		if row.ReplacedBy.Valid && row.ReplacedBy.String != "" {
+			tx, err := s.store.BeginTx(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("begin transaction: %w", err)
+			}
+			if err := s.store.RevokeAllUserTokens(ctx, tx, row.UserID); err != nil {
+				if rbErr := tx.Rollback(ctx); rbErr != nil {
+					s.logger.Error("rollback failed", "error", rbErr)
+				}
+				return nil, fmt.Errorf("revoke user tokens: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit replay revocation: %w", err)
+			}
+			return nil, ErrTokenReplayDetected
+		}
+		return nil, ErrInvalidCredentials
+	}
+
+	if row.ExpiresAt.Before(now) {
+		return nil, ErrInvalidCredentials
+	}
+
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	if err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, ""); err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, fmt.Errorf("revoke refresh token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit rotation: %w", err)
+	}
+
+	return s.issueTokenPair(ctx, row.UserID, "", nil)
+}
+
+// Logout revokes the presented refresh token.
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	refreshHash := hashToken(refreshToken)
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	if err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, ""); err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return fmt.Errorf("revoke refresh token: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// Me returns the authenticated user's public profile.
+func (s *Service) Me(ctx context.Context, userID int64) (*User, error) {
+	record, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	return &User{
+		ID:       record.ID,
+		Email:    record.Email,
+		Phone:    record.Phone,
+		IsActive: record.IsActive,
+		Roles:    record.Roles,
+	}, nil
+}
+
+func (s *Service) issueTokenPair(ctx context.Context, userID int64, email string, roles []string) (*TokenPair, error) {
+	accessToken, _, err := IssueAccessToken(userID, email, roles, AccessTokenConfig{
+		Secret: s.accessTokenSecret,
+		TTL:    s.accessTokenTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("issue access token: %w", err)
+	}
+
+	refreshPlain, refreshHash, err := GenerateRefreshToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate refresh token: %w", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(s.refreshTokenTTL)
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	if err := s.store.InsertRefreshToken(ctx, tx, userID, refreshHash, expiresAt); err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, fmt.Errorf("store refresh token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit refresh token: %w", err)
+	}
+
+	return &TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: refreshPlain,
+	}, nil
+}
+
+// hashToken hashes a plaintext refresh token for lookup/revocation.
+func hashToken(plaintext string) string {
+	sum := sha256.Sum256([]byte(plaintext))
+	return base64.RawStdEncoding.EncodeToString(sum[:])
+}

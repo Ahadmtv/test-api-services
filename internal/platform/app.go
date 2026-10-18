@@ -57,6 +57,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return a.fiber.ShutdownWithContext(ctx)
 }
 
+// Fiber returns the underlying Fiber application for route registration.
+func (a *App) Fiber() *fiber.App {
+	return a.fiber
+}
+
 // DB returns the database connection pool.
 func (a *App) DB() *DB {
 	return a.db

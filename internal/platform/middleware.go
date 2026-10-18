@@ -16,6 +16,10 @@ const (
 	requestIDKey       = "request_id"
 	requestIDHeader    = "X-Request-ID"
 	problemContentType = "application/problem+json"
+
+	// PrincipalKey is the Fiber locals key under which the authenticated
+	// identity.Principal is stored after successful JWT validation.
+	PrincipalKey = "principal"
 )
 
 type problemResponse struct {
