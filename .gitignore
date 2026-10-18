@@ -1,0 +1,26 @@
+# Binaries
+/bin
+/api
+*.exe
+
+# Go
+/vendor/
+*.sum.bak
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage.out
+coverage.html

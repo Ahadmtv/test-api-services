@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:16.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-booker}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_DB: ${DB_NAME:-bookings}
+      POSTGRES_INITDB_ARGS: "--auth-host=md5"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"${DB_USER:-booker}\" -d \"${DB_NAME:-bookings}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      APP_VERSION: 0.1.0
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 8080
+      HTTP_READ_TIMEOUT: 10s
+      HTTP_WRITE_TIMEOUT: 10s
+      HTTP_IDLE_TIMEOUT: 30s
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-booker}
+      DB_PASSWORD: ${DB_PASSWORD:-changeme}
+      DB_NAME: ${DB_NAME:-bookings}
+      DB_SSL_MODE: disable
+      DB_MAX_OPEN_CONNS: 25
+      DB_MAX_IDLE_CONNS: 5
+      DB_MAX_CONN_IDLE_TIME: 10m
+      DB_MAX_CONN_LIFETIME: 1h
+      LOG_LEVEL: debug
+      LOG_FORMAT: text
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    command: ["/bin/api"]
+
+volumes:
+  dbdata:
