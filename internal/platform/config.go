@@ -20,6 +20,7 @@ type Config struct {
 	Log          LogConfig
 	Auth         AuthConfig
 	Availability AvailabilityConfig
+	Booking      BookingConfig
 	Version      string
 }
 
@@ -27,6 +28,10 @@ type AvailabilityConfig struct {
 	SlotIncrement  time.Duration
 	MinimumNotice  time.Duration
 	MaximumHorizon time.Duration
+}
+
+type BookingConfig struct {
+	CancellationCutoff time.Duration
 }
 
 type AuthConfig struct {
@@ -177,6 +182,11 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Availability.MaximumHorizon <= cfg.Availability.MinimumNotice {
 		return nil, fmt.Errorf("AVAILABILITY_MAX_HORIZON must exceed AVAILABILITY_MIN_NOTICE")
+	}
+
+	cfg.Booking.CancellationCutoff, err = parseAvailabilityDuration("BOOKING_CANCELLATION_CUTOFF", 0, true)
+	if err != nil {
+		return nil, err
 	}
 
 	return cfg, nil

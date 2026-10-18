@@ -1,0 +1,214 @@
+package booking
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+
+	"test-api/internal/auth"
+	"test-api/internal/identity"
+	"test-api/internal/platform"
+)
+
+type Handler struct {
+	service *Service
+	config  Config
+}
+
+func NewHandler(service *Service, config Config) *Handler {
+	return &Handler{service: service, config: config}
+}
+
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+	bookings := app.Group("/api/v1/bookings")
+	bookings.Use(auth.Authenticator(accessTokenSecret))
+	bookings.Post("/", auth.RequireRoles("client"), h.Create)
+	bookings.Get("/", auth.RequireRoles("client"), h.ClientHistory)
+	bookings.Get("/:bookingID", auth.RequireRoles("client", "provider"), h.Get)
+	bookings.Post("/:bookingID/cancel", auth.RequireRoles("client"), h.Cancel)
+
+	provider := app.Group("/api/v1/provider/bookings")
+	provider.Use(auth.Authenticator(accessTokenSecret))
+	provider.Use(auth.RequireRoles("provider"))
+	provider.Get("/", h.ProviderBookings)
+	provider.Post("/:bookingID/start", h.Start)
+}
+
+type createRequest struct {
+	ServiceID int64  `json:"service_id"`
+	StartsAt  string `json:"starts_at"`
+}
+
+func (h *Handler) Create(c fiber.Ctx) error {
+	var req createRequest
+	decoder := json.NewDecoder(bytes.NewReader(c.Body()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return invalidBookingRequest()
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return invalidBookingRequest()
+	}
+	if req.ServiceID < 1 {
+		return invalidBookingRequest()
+	}
+	startsAt, err := time.Parse(time.RFC3339, req.StartsAt)
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	key := strings.TrimSpace(c.Get("Idempotency-Key"))
+	if len(key) > 128 {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := h.service.Create(c.Context(), principal(c).UserID, CreateInput{
+		ServiceID: req.ServiceID, StartsAt: startsAt, IdempotencyKey: key, RequestID: requestID,
+	}, h.config)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(item)
+}
+
+func (h *Handler) Get(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	item, err := h.service.Get(c.Context(), principal(c).UserID, id)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
+}
+
+func (h *Handler) ClientHistory(c fiber.Ctx) error {
+	after, limit, err := bookingPageParams(c)
+	if err != nil {
+		return err
+	}
+	items, more, err := h.service.ListClient(c.Context(), principal(c).UserID, after, limit)
+	if err != nil {
+		return platform.Unexpected(err)
+	}
+	return c.JSON(bookingPage(items, more))
+}
+
+func (h *Handler) ProviderBookings(c fiber.Ctx) error {
+	after, limit, err := bookingPageParams(c)
+	if err != nil {
+		return err
+	}
+	items, more, err := h.service.ListProvider(c.Context(), principal(c).UserID, after, limit)
+	if err != nil {
+		return platform.Unexpected(err)
+	}
+	return c.JSON(bookingPage(items, more))
+}
+
+func (h *Handler) Start(c fiber.Ctx) error {
+	return h.providerTransition(c, h.service.Start)
+}
+
+func (h *Handler) providerTransition(c fiber.Ctx, transition func(context.Context, int64, int64, string) (*Booking, error)) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := transition(c.Context(), principal(c).UserID, id, requestID)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
+}
+
+func (h *Handler) Cancel(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := h.service.Cancel(c.Context(), principal(c).UserID, id, h.config.CancellationCutoff, requestID)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
+}
+
+type bookingPageResponse struct {
+	Items      []Booking `json:"items"`
+	NextCursor *int64    `json:"next_cursor"`
+}
+
+func bookingPage(items []Booking, more bool) bookingPageResponse {
+	page := bookingPageResponse{Items: items}
+	if more && len(items) > 0 {
+		cursor := items[len(items)-1].ID
+		page.NextCursor = &cursor
+	}
+	return page
+}
+
+func bookingPageParams(c fiber.Ctx) (int64, int, error) {
+	var after int64
+	var err error
+	if value := c.Query("cursor"); value != "" {
+		after, err = bookingID(value)
+		if err != nil {
+			return 0, 0, invalidBookingRequest()
+		}
+	}
+	limit := 50
+	if value := c.Query("limit"); value != "" {
+		limit, err = strconv.Atoi(value)
+		if err != nil || limit < 1 || limit > 100 {
+			return 0, 0, platform.NewAppError("invalid_limit", "اندازه صفحه باید بین ۱ تا ۱۰۰ باشد", 400, nil)
+		}
+	}
+	return after, limit, nil
+}
+
+func bookingID(value string) (int64, error) {
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id < 1 {
+		return 0, errors.New("invalid booking id")
+	}
+	return id, nil
+}
+
+func principal(c fiber.Ctx) identity.Principal {
+	return c.Locals(platform.PrincipalKey).(identity.Principal)
+}
+
+func invalidBookingRequest() error {
+	return platform.NewAppError("invalid_booking_request", "درخواست رزرو نامعتبر است", 400, nil)
+}
+
+func bookingError(err error) error {
+	switch {
+	case errors.Is(err, ErrInvalidInput):
+		return invalidBookingRequest()
+	case errors.Is(err, ErrServiceUnavailable):
+		return platform.NewAppError("service_unavailable", "خدمت برای رزرو در دسترس نیست", 404, nil)
+	case errors.Is(err, ErrBookingNotFound):
+		return platform.NewAppError("booking_not_found", "رزرو یافت نشد", 404, nil)
+	case errors.Is(err, ErrSlotUnavailable):
+		return platform.NewAppError("booking_conflict", "زمان درخواستی دیگر در دسترس نیست", 409, nil)
+	case errors.Is(err, ErrIdempotencyConflict):
+		return platform.NewAppError("idempotency_conflict", "کلید تکرار برای درخواست متفاوت استفاده شده است", 409, nil)
+	case errors.Is(err, ErrInvalidTransition):
+		return platform.NewAppError("invalid_booking_transition", "این تغییر وضعیت رزرو مجاز نیست", 409, nil)
+	case errors.Is(err, ErrCancellationClosed):
+		return platform.NewAppError("cancellation_window_closed", "مهلت لغو رزرو پایان یافته است", 409, nil)
+	default:
+		return platform.Unexpected(err)
+	}
+}

@@ -77,6 +77,9 @@ func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	if cfg.Availability.SlotIncrement != 15*time.Minute || cfg.Availability.MinimumNotice != 2*time.Hour || cfg.Availability.MaximumHorizon != 90*24*time.Hour {
 		t.Errorf("availability config = %+v", cfg.Availability)
 	}
+	if cfg.Booking.CancellationCutoff != 0 {
+		t.Errorf("booking config = %+v", cfg.Booking)
+	}
 
 	dsn := cfg.DB.DSN()
 	if !strings.Contains(dsn, "postgres://tester:secret@localhost:5432/testdb?sslmode=disable") {
@@ -122,6 +125,41 @@ func TestLoadConfigRejectsInvalidAvailabilitySettings(t *testing.T) {
 			t.Setenv(tc.name, tc.value)
 			if _, err := LoadConfig(); err == nil {
 				t.Fatalf("expected invalid availability setting %s=%s", tc.name, tc.value)
+			}
+		})
+	}
+}
+
+func TestLoadConfigBookingPolicyOverrides(t *testing.T) {
+	envWith(t, map[string]string{
+		"DB_USER":                       "tester",
+		"DB_NAME":                       "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET":      "01234567890123456789012345678901",
+		"BOOKING_CANCELLATION_CUTOFF":   "1h",
+	})
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load booking policy config: %v", err)
+	}
+	if cfg.Booking.CancellationCutoff != time.Hour {
+		t.Fatalf("booking config = %+v", cfg.Booking)
+	}
+}
+
+func TestLoadConfigRejectsInvalidBookingPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+	}{
+		{"BOOKING_CANCELLATION_CUTOFF", "-1m"},
+	} {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			t.Setenv("DB_USER", "tester")
+			t.Setenv("DB_NAME", "testdb")
+			t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
+			t.Setenv("BOOKING_CANCELLATION_CUTOFF", "")
+			t.Setenv(tc.name, tc.value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("expected invalid booking setting %s=%s", tc.name, tc.value)
 			}
 		})
 	}

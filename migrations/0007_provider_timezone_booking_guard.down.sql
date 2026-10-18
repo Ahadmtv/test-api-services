@@ -1,0 +1,2 @@
+DROP TRIGGER provider_profiles_time_zone_booking_guard ON provider_profiles;
+DROP FUNCTION prevent_provider_timezone_change_with_bookings();

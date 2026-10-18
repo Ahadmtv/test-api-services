@@ -1,0 +1,10 @@
+DROP TABLE idempotency_records;
+DROP TRIGGER booking_state_transitions_immutable ON booking_state_transitions;
+DROP FUNCTION prevent_booking_transition_mutation();
+DROP TRIGGER bookings_state_transition_audit ON bookings;
+DROP FUNCTION audit_booking_state_transition();
+DROP TRIGGER bookings_state_transition_guard ON bookings;
+DROP FUNCTION enforce_booking_state_transition();
+DROP TABLE booking_state_transitions;
+DROP TABLE bookings;
+ALTER TABLE services DROP CONSTRAINT services_provider_id_id_key;

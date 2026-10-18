@@ -324,8 +324,6 @@ paths:
     get:
       summary: در دسترس بودن زمان‌ها برای ارائه‌دهنده و خدمت
       description: بازه‌های زمانی موجود برای رزرو را برمی‌گرداند. پارامتر `date` تاریخ تقویمی میلادی در منطقه زمانی محلی ارائه‌دهنده است. بازه‌های بازگشتی بر اساس ساعت کاری، مرخصی، رزروهای موجود و بافر محاسبه شده‌اند. نتیجه مشورتی است و تضمین رزرو محسوب نمی‌شود.
-      security:
-        - bearerAuth: []
       parameters:
         - $ref: '#/components/parameters/ProviderID'
         - name: service_id
@@ -352,6 +350,146 @@ paths:
                 $ref: '#/components/schemas/AvailabilityResponse'
         '400':
           $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /api/v1/bookings:
+    post:
+      summary: ایجاد رزرو
+      description: مشتری فقط شناسه خدمت و زمان آغاز را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. رزرو در همان تراکنش با وضعیت confirmed ایجاد و تا لغو یا تغییر چرخه رزرو اشغال می‌ماند. تأیید رزرو به معنی دریافت وجه نیست.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: کلید تکرار درخواست در محدوده مشتری و عملیات ایجاد رزرو
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingCreateInput'
+      responses:
+        '201':
+          description: رزرو confirmed یا پاسخ بازپخش‌شده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+    get:
+      summary: تاریخچه رزروهای مشتری
+      description: رزروهای متعلق به مشتری احرازشده را با صفحه‌بندی cursor-based برمی‌گرداند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: صفحه رزروها
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingPage'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+  /api/v1/bookings/{bookingID}:
+    get:
+      summary: دریافت جزئیات رزرو
+      description: فقط مشتری یا ارائه‌دهنده همان رزرو می‌تواند جزئیات آن را دریافت کند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingID'
+      responses:
+        '200':
+          description: جزئیات رزرو و snapshot خدمت
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /api/v1/bookings/{bookingID}/cancel:
+    post:
+      summary: لغو رزرو توسط مشتری
+      description: رزرو pending قابل لغو است؛ رزرو confirmed تا مهلت پیکربندی‌شده پیش از آغاز قابل لغو است.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingID'
+      responses:
+        '200':
+          description: رزرو لغوشده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /api/v1/provider/bookings:
+    get:
+      summary: فهرست رزروهای ارائه‌دهنده
+      description: رزروهای ارائه‌دهنده احرازشده را با صفحه‌بندی cursor-based برمی‌گرداند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: صفحه رزروها
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingPage'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+  /api/v1/provider/bookings/{bookingID}/start:
+    post:
+      summary: آغاز خدمت
+      description: ارائه‌دهنده همان رزرو می‌تواند رزرو confirmed را از زمان آغاز برنامه‌ریزی‌شده به in_progress ببرد.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingID'
+      responses:
+        '200':
+          description: رزرو در حال انجام
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
         '401':
           $ref: '#/components/responses/Problem'
         '403':
@@ -396,6 +534,14 @@ components:
         minimum: 1
     ProviderID:
       name: providerID
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    BookingID:
+      name: bookingID
       in: path
       required: true
       schema:
@@ -511,18 +657,25 @@ components:
       required: [id, kind, starts_at, ends_at, reason]
       properties:
         id: { type: integer, format: int64 }
-        kind: { type: string, enum: [time_off, blocked] }
+        kind: { type: string, enum: [time_off, blocked, holiday] }
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time }
         reason: { type: string }
+        holiday_date: { type: [string, 'null'], format: date }
     TimeOffInput:
-      type: object
-      required: [kind, starts_at, ends_at]
-      properties:
-        kind: { type: string, enum: [time_off, blocked] }
-        starts_at: { type: string, format: date-time }
-        ends_at: { type: string, format: date-time }
-        reason: { type: string, maxLength: 500 }
+      oneOf:
+        - type: object
+          required: [kind, starts_at, ends_at]
+          properties:
+            kind: { type: string, enum: [time_off, blocked] }
+            starts_at: { type: string, format: date-time }
+            ends_at: { type: string, format: date-time }
+            reason: { type: string, maxLength: 500 }
+        - type: object
+          required: [kind, holiday_date]
+          properties:
+            kind: { type: string, const: holiday }
+            holiday_date: { type: string, format: date }
     TimeOffPage:
       type: object
       required: [items, next_cursor]
@@ -530,6 +683,42 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/TimeOff' }
+        next_cursor:
+          type: [integer, 'null']
+          format: int64
+    BookingCreateInput:
+      type: object
+      additionalProperties: false
+      required: [service_id, starts_at]
+      properties:
+        service_id: { type: integer, format: int64, minimum: 1 }
+        starts_at: { type: string, format: date-time, description: لحظه آغاز RFC 3339 با offset }
+    Booking:
+      type: object
+      required: [id, client_id, provider_id, service_id, service_name, starts_at, ends_at, duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        client_id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        service_id: { type: integer, format: int64 }
+        service_name: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
+        price_irr: { type: integer, format: int64, minimum: 0, description: snapshot مبلغ صحیح ریال؛ دریافت یا قفل وجه انجام نمی‌شود }
+        buffer_minutes: { type: integer, minimum: 0, maximum: 1440 }
+        status:
+          type: string
+          enum: [confirmed, in_progress, completed, cancelled, expired]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BookingPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Booking' }
         next_cursor:
           type: [integer, 'null']
           format: int64

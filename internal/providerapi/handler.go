@@ -408,6 +408,10 @@ func profileError(err error) error {
 	case errors.Is(err, providers.ErrInvalidProfile):
 		return platform.NewAppError("invalid_provider_profile", "اطلاعات نمایه ارائه‌دهنده نامعتبر است", 400, nil)
 	default:
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.ConstraintName == "provider_profiles_time_zone_booking_guard" {
+			return platform.NewAppError("schedule_conflict", "منطقه زمانی هنگام وجود رزرو فعال قابل تغییر نیست", 409, nil)
+		}
 		return platform.Unexpected(err)
 	}
 }
@@ -431,6 +435,8 @@ func schedulingError(err error) error {
 		return platform.NewAppError("provider_profile_not_found", "پیش از تنظیم برنامه، نمایه ارائه‌دهنده را ثبت کنید", 404, nil)
 	case errors.Is(err, scheduling.ErrInvalidTimeOff):
 		return timeOffInvalid()
+	case errors.Is(err, scheduling.ErrScheduleConflict):
+		return platform.NewAppError("schedule_conflict", "تغییر برنامه با رزرو فعال تداخل دارد", 409, nil)
 	case errors.Is(err, scheduling.ErrInvalidLocalDate):
 		return platform.NewAppError("invalid_holiday_date", "تاریخ محلی تعطیلی نامعتبر است", 400, nil)
 	default:

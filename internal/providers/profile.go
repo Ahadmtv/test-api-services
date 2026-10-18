@@ -60,6 +60,21 @@ func (s *Service) Get(ctx context.Context, providerID int64) (*Profile, error) {
 	return &profile, nil
 }
 
+func (s *Service) LockForBookingTx(ctx context.Context, tx pgx.Tx, providerID int64) (*Profile, error) {
+	var profile Profile
+	err := tx.QueryRow(ctx, `
+		SELECT provider_id, display_name, description, time_zone, is_active, verification_status
+		FROM provider_profiles WHERE provider_id = $1 FOR UPDATE
+	`, providerID).Scan(&profile.ProviderID, &profile.DisplayName, &profile.Description, &profile.TimeZone, &profile.IsActive, &profile.VerificationStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock provider profile for booking: %w", err)
+	}
+	return &profile, nil
+}
+
 func (s *Service) SetVerificationStatus(ctx context.Context, actorID, providerID int64, status, requestID string) (*Profile, error) {
 	if status != "pending" && status != "verified" && status != "rejected" {
 		return nil, ErrInvalidProfile

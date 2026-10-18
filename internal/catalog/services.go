@@ -107,6 +107,34 @@ func (s *Store) GetPublicForProvider(ctx context.Context, providerID, serviceID 
 	return item, nil
 }
 
+func (s *Store) BookingProviderIDTx(ctx context.Context, tx pgx.Tx, serviceID int64) (int64, error) {
+	var providerID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM services WHERE id = $1`, serviceID).Scan(&providerID); errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrServiceNotFound
+	} else if err != nil {
+		return 0, fmt.Errorf("get service provider for booking: %w", err)
+	}
+	return providerID, nil
+}
+
+func (s *Store) GetForBookingTx(ctx context.Context, tx pgx.Tx, providerID, serviceID int64) (*ServiceItem, error) {
+	item, err := scanService(tx.QueryRow(ctx, `
+		SELECT s.id, s.provider_id, s.name, s.description, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		FROM services s
+		JOIN provider_profiles p ON p.provider_id = s.provider_id
+		WHERE s.id = $1 AND s.provider_id = $2
+			AND s.is_active AND p.is_active AND p.verification_status = 'verified'
+		FOR SHARE OF s
+	`, serviceID, providerID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrServiceNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get service snapshot for booking: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Store) ListPublic(ctx context.Context, after int64, limit int) ([]ServiceItem, bool, error) {
 	return s.list(ctx, nil, after, limit)
 }

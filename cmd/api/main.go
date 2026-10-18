@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"test-api/internal/auth"
+	"test-api/internal/booking"
 	"test-api/internal/catalog"
 	"test-api/internal/identity"
 	"test-api/internal/platform"
@@ -81,6 +82,12 @@ func run(ctx context.Context, args []string) error {
 		policy,
 	)
 	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	bookingConfig := booking.Config{
+		CancellationCutoff: cfg.Booking.CancellationCutoff,
+		Availability:       policy,
+	}
+	bookingHandler := booking.NewHandler(booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool())), bookingConfig)
+	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 
 	authGroup := app.Fiber().Group("/api/v1/auth")
 	authGroup.Post("/register", handler.Register)
