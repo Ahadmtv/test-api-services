@@ -90,6 +90,23 @@ func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 	return item, nil
 }
 
+func (s *Store) GetPublicForProvider(ctx context.Context, providerID, serviceID int64) (*ServiceItem, error) {
+	item, err := scanService(s.pool.QueryRow(ctx, `
+		SELECT s.id, s.provider_id, s.name, s.description, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		FROM services s
+		JOIN provider_profiles p ON p.provider_id = s.provider_id
+		WHERE s.id = $1 AND s.provider_id = $2
+			AND s.is_active AND p.is_active AND p.verification_status = 'verified'
+	`, serviceID, providerID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrServiceNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get availability service: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Store) ListPublic(ctx context.Context, after int64, limit int) ([]ServiceItem, bool, error) {
 	return s.list(ctx, nil, after, limit)
 }

@@ -2,6 +2,7 @@ package scheduling
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -18,11 +19,55 @@ type WorkingInterval struct {
 }
 
 type TimeOff struct {
-	ID       int64     `json:"id"`
-	Kind     string    `json:"kind"`
-	StartsAt time.Time `json:"starts_at"`
-	EndsAt   time.Time `json:"ends_at"`
-	Reason   string    `json:"reason"`
+	ID          int64     `json:"id"`
+	Kind        string    `json:"kind"`
+	StartsAt    time.Time `json:"starts_at"`
+	EndsAt      time.Time `json:"ends_at"`
+	Reason      string    `json:"reason"`
+	HolidayDate *string   `json:"holiday_date,omitempty"`
+}
+
+type OccupancyReader interface {
+	ListOccupied(context.Context, int64, time.Time, time.Time) ([]TimeInterval, error)
+}
+
+type EmptyOccupancyReader struct{}
+
+func (EmptyOccupancyReader) ListOccupied(context.Context, int64, time.Time, time.Time) ([]TimeInterval, error) {
+	return []TimeInterval{}, nil
+}
+
+type OccupancyStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewOccupancyStore(pool *pgxpool.Pool) *OccupancyStore {
+	return &OccupancyStore{pool: pool}
+}
+
+func (o *OccupancyStore) ListOccupied(ctx context.Context, providerID int64, startAt, endAt time.Time) ([]TimeInterval, error) {
+	rows, err := o.pool.Query(ctx, `
+		SELECT starts_at, ends_at
+		FROM bookings
+		WHERE provider_id = $1 AND status IN ('pending_provider_acceptance', 'confirmed', 'in_progress')
+		  AND starts_at < $3 AND ends_at > $2
+		ORDER BY starts_at
+	`, providerID, startAt.UTC(), endAt.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("list occupied intervals: %w", err)
+	}
+	defer rows.Close()
+	intervals := make([]TimeInterval, 0)
+	for rows.Next() {
+		var interval TimeInterval
+		if err := rows.Scan(&interval.StartAt, &interval.EndAt); err != nil {
+			return nil, err
+		}
+		interval.StartAt = interval.StartAt.UTC()
+		interval.EndAt = interval.EndAt.UTC()
+		intervals = append(intervals, interval)
+	}
+	return intervals, rows.Err()
 }
 
 var ErrInvalidSchedule = errors.New("invalid schedule")
@@ -124,6 +169,63 @@ func ValidateTimeOff(kind string, startsAt, endsAt time.Time, reason string) err
 	return nil
 }
 
+func (s *Store) CreateHoliday(ctx context.Context, providerID int64, date string) (*TimeOff, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin provider holiday creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var timeZone string
+	if err := tx.QueryRow(ctx, `SELECT time_zone FROM provider_profiles WHERE provider_id = $1 FOR UPDATE`, providerID).Scan(&timeZone); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProviderNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("lock provider profile: %w", err)
+	}
+	dayRange, err := LocalDayRange(date, timeZone)
+	if err != nil {
+		return nil, ErrInvalidLocalDate
+	}
+	var item TimeOff
+	err = tx.QueryRow(ctx, `
+		INSERT INTO provider_time_off (provider_id, kind, starts_at, ends_at, reason, holiday_date)
+		VALUES ($1, 'holiday', $2, $3, '', $4::date)
+		RETURNING id, kind, starts_at, ends_at, reason, holiday_date::text
+	`, providerID, dayRange.StartAt, dayRange.EndAt, date).Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason, &item.HolidayDate)
+	if err != nil {
+		return nil, fmt.Errorf("create provider holiday: %w", err)
+	}
+	item.StartsAt = item.StartsAt.UTC()
+	item.EndsAt = item.EndsAt.UTC()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit provider holiday: %w", err)
+	}
+	return &item, nil
+}
+
+func (s *Store) ListAvailabilityIntervals(ctx context.Context, providerID int64, startAt, endAt time.Time) ([]TimeInterval, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT starts_at, ends_at
+		FROM provider_time_off
+		WHERE provider_id = $1 AND starts_at < $3 AND ends_at > $2
+		ORDER BY starts_at
+	`, providerID, startAt.UTC(), endAt.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("list provider availability intervals: %w", err)
+	}
+	defer rows.Close()
+	intervals := make([]TimeInterval, 0)
+	for rows.Next() {
+		var interval TimeInterval
+		if err := rows.Scan(&interval.StartAt, &interval.EndAt); err != nil {
+			return nil, err
+		}
+		interval.StartAt = interval.StartAt.UTC()
+		interval.EndAt = interval.EndAt.UTC()
+		intervals = append(intervals, interval)
+	}
+	return intervals, rows.Err()
+}
+
 func (s *Store) CreateTimeOff(ctx context.Context, providerID int64, kind string, startsAt, endsAt time.Time, reason string) (*TimeOff, error) {
 	if err := ValidateTimeOff(kind, startsAt, endsAt, reason); err != nil {
 		return nil, err
@@ -142,11 +244,15 @@ func (s *Store) CreateTimeOff(ctx context.Context, providerID int64, kind string
 		return nil, fmt.Errorf("lock provider profile: %w", err)
 	}
 	var item TimeOff
+	var holidayDate sql.NullString
 	err = tx.QueryRow(ctx, `
 		INSERT INTO provider_time_off (provider_id, kind, starts_at, ends_at, reason)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, kind, starts_at, ends_at, reason
-	`, providerID, kind, startsAt, endsAt, reason).Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason)
+		RETURNING id, kind, starts_at, ends_at, reason, holiday_date::text
+	`, providerID, kind, startsAt, endsAt, reason).Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason, &holidayDate)
+	if holidayDate.Valid {
+		item.HolidayDate = &holidayDate.String
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create provider time-off interval: %w", err)
 	}
@@ -160,7 +266,7 @@ func (s *Store) CreateTimeOff(ctx context.Context, providerID int64, kind string
 
 func (s *Store) ListTimeOff(ctx context.Context, providerID, after int64, limit int) ([]TimeOff, bool, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, kind, starts_at, ends_at, reason
+		SELECT id, kind, starts_at, ends_at, reason, holiday_date::text
 		FROM provider_time_off WHERE provider_id = $1 AND id > $2
 		ORDER BY id LIMIT $3
 	`, providerID, after, limit+1)
@@ -171,11 +277,15 @@ func (s *Store) ListTimeOff(ctx context.Context, providerID, after int64, limit 
 	items := make([]TimeOff, 0, limit)
 	for rows.Next() {
 		var item TimeOff
-		if err := rows.Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason); err != nil {
+		var holidayDate sql.NullString
+		if err := rows.Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason, &holidayDate); err != nil {
 			return nil, false, err
 		}
 		item.StartsAt = item.StartsAt.UTC()
 		item.EndsAt = item.EndsAt.UTC()
+		if holidayDate.Valid {
+			item.HolidayDate = &holidayDate.String
+		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

@@ -17,16 +17,19 @@ import (
 )
 
 type Handler struct {
-	profiles *providers.Service
-	services *catalog.Store
-	schedule *scheduling.Store
+	profiles  *providers.Service
+	services  *catalog.Store
+	schedule  *scheduling.Store
+	occupancy scheduling.OccupancyReader
+	policy    scheduling.AvailabilityPolicy
 }
 
-func NewHandler(profiles *providers.Service, services *catalog.Store, schedule *scheduling.Store) *Handler {
-	return &Handler{profiles: profiles, services: services, schedule: schedule}
+func NewHandler(profiles *providers.Service, services *catalog.Store, schedule *scheduling.Store, occupancy scheduling.OccupancyReader, policy scheduling.AvailabilityPolicy) *Handler {
+	return &Handler{profiles: profiles, services: services, schedule: schedule, occupancy: occupancy, policy: policy}
 }
 
 func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+	app.Get("/api/v1/providers/:providerID/availability", h.GetAvailability)
 	app.Get("/api/v1/services", h.ListPublicServices)
 	app.Get("/api/v1/services/:serviceID", h.GetPublicService)
 
@@ -48,6 +51,53 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	admin.Use(authenticator(accessTokenSecret))
 	admin.Use(auth.RequireRoles("admin"))
 	admin.Patch("/providers/:providerID/verification", h.SetVerificationStatus)
+}
+
+func (h *Handler) GetAvailability(c fiber.Ctx) error {
+	providerID, err := positiveID(c.Params("providerID"))
+	if err != nil {
+		return invalidID()
+	}
+	serviceID, err := positiveID(c.Query("service_id"))
+	if err != nil {
+		return platform.NewAppError("invalid_service_id", "شناسه خدمت نامعتبر است", 400, nil)
+	}
+	date := c.Query("date")
+	if _, err := time.Parse("2006-01-02", date); err != nil || len(date) != len("2006-01-02") {
+		return platform.NewAppError("invalid_date", "تاریخ باید به قالب میلادی YYYY-MM-DD باشد", 400, nil)
+	}
+	profile, err := h.profiles.Get(c.Context(), providerID)
+	if err != nil {
+		return profileError(err)
+	}
+	if !profile.IsActive || profile.VerificationStatus != "verified" {
+		return platform.NewAppError("provider_unavailable", "ارائه‌دهنده در دسترس نیست", 404, nil)
+	}
+	service, err := h.services.GetPublicForProvider(c.Context(), providerID, serviceID)
+	if err != nil {
+		return catalogError(err)
+	}
+	dayRange, err := scheduling.LocalDayRange(date, profile.TimeZone)
+	if err != nil {
+		return availabilityError(err)
+	}
+	workingHours, err := h.schedule.GetWorkingHours(c.Context(), providerID)
+	if err != nil {
+		return platform.Unexpected(err)
+	}
+	blocked, err := h.schedule.ListAvailabilityIntervals(c.Context(), providerID, dayRange.StartAt, dayRange.EndAt)
+	if err != nil {
+		return platform.Unexpected(err)
+	}
+	occupied, err := h.occupancy.ListOccupied(c.Context(), providerID, dayRange.StartAt, dayRange.EndAt)
+	if err != nil {
+		return platform.Unexpected(err)
+	}
+	slots, err := scheduling.CalculateAvailability(date, profile.TimeZone, workingHours, blocked, occupied, service.DurationMinutes, service.BufferMinutes, h.policy, time.Now().UTC())
+	if err != nil {
+		return availabilityError(err)
+	}
+	return c.JSON(map[string]any{"provider_id": providerID, "service_id": serviceID, "date": date, "time_zone": profile.TimeZone, "slots": slots})
 }
 
 type profileRequest struct {
@@ -229,15 +279,29 @@ func (h *Handler) PutWorkingHours(c fiber.Ctx) error {
 }
 
 type timeOffRequest struct {
-	Kind     string `json:"kind"`
-	StartsAt string `json:"starts_at"`
-	EndsAt   string `json:"ends_at"`
-	Reason   string `json:"reason"`
+	Kind        string  `json:"kind"`
+	StartsAt    string  `json:"starts_at"`
+	EndsAt      string  `json:"ends_at"`
+	Reason      string  `json:"reason"`
+	HolidayDate *string `json:"holiday_date"`
 }
 
 func (h *Handler) CreateTimeOff(c fiber.Ctx) error {
 	var req timeOffRequest
 	if err := c.Bind().Body(&req); err != nil {
+		return invalidRequest()
+	}
+	if req.Kind == "holiday" {
+		if req.HolidayDate == nil || req.StartsAt != "" || req.EndsAt != "" || req.Reason != "" {
+			return invalidRequest()
+		}
+		item, err := h.schedule.CreateHoliday(c.Context(), principal(c).UserID, *req.HolidayDate)
+		if err != nil {
+			return schedulingError(err)
+		}
+		return c.Status(fiber.StatusCreated).JSON(item)
+	}
+	if req.HolidayDate != nil {
 		return invalidRequest()
 	}
 	startsAt, err := parseRFC3339(req.StartsAt)
@@ -324,6 +388,19 @@ func principal(c fiber.Ctx) identity.Principal {
 	return c.Locals(platform.PrincipalKey).(identity.Principal)
 }
 
+func availabilityError(err error) error {
+	switch {
+	case errors.Is(err, scheduling.ErrInvalidLocalDate):
+		return platform.NewAppError("invalid_date", "تاریخ محلی نامعتبر است", 400, nil)
+	case errors.Is(err, scheduling.ErrInvalidTimeZone):
+		return platform.NewAppError("invalid_provider_time_zone", "منطقه زمانی ارائه‌دهنده نامعتبر است", 409, nil)
+	case errors.Is(err, scheduling.ErrInvalidAvailability):
+		return platform.NewAppError("invalid_availability_configuration", "پیکربندی زمان‌بندی ارائه‌دهنده نامعتبر است", 409, nil)
+	default:
+		return platform.Unexpected(err)
+	}
+}
+
 func profileError(err error) error {
 	switch {
 	case errors.Is(err, providers.ErrProfileNotFound):
@@ -354,6 +431,8 @@ func schedulingError(err error) error {
 		return platform.NewAppError("provider_profile_not_found", "پیش از تنظیم برنامه، نمایه ارائه‌دهنده را ثبت کنید", 404, nil)
 	case errors.Is(err, scheduling.ErrInvalidTimeOff):
 		return timeOffInvalid()
+	case errors.Is(err, scheduling.ErrInvalidLocalDate):
+		return platform.NewAppError("invalid_holiday_date", "تاریخ محلی تعطیلی نامعتبر است", 400, nil)
 	default:
 		return databaseConflictError(err)
 	}

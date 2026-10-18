@@ -108,7 +108,13 @@ func TestStage03APIIntegration(t *testing.T) {
 
 	app := fiber.New(fiber.Config{ErrorHandler: platform.ErrorHandler(nilLogger())})
 	app.Use(platform.RequestID())
-	NewHandler(providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool)).Register(app, integrationSecret)
+	occupancy := scheduling.NewOccupancyStore(pool)
+	policy := scheduling.AvailabilityPolicy{
+		SlotIncrement:  15 * time.Minute,
+		MinimumNotice:  2 * time.Hour,
+		MaximumHorizon: 90 * 24 * time.Hour,
+	}
+	NewHandler(providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), occupancy, policy).Register(app, integrationSecret)
 
 	ownerToken := integrationToken(t, ownerID)
 	resp := doRequest(t, app, http.MethodPut, "/api/v1/provider/profile", ownerToken, `{"display_name":"Missing status","time_zone":"Asia/Tehran"}`)

@@ -67,10 +67,18 @@ func run(ctx context.Context, args []string) error {
 	handler := auth.NewHandler(service, logger, rateLimiter, int64(cfg.Auth.AccessTokenTTL.Seconds()))
 
 	app := platform.NewApp(cfg, logger, db)
+	occupancy := scheduling.NewOccupancyStore(db.Pool())
+	policy := scheduling.AvailabilityPolicy{
+		SlotIncrement:  cfg.Availability.SlotIncrement,
+		MinimumNotice:  cfg.Availability.MinimumNotice,
+		MaximumHorizon: cfg.Availability.MaximumHorizon,
+	}
 	providerHandler := providerapi.NewHandler(
 		providers.NewService(db.Pool()),
 		catalog.NewStore(db.Pool()),
 		scheduling.NewStore(db.Pool()),
+		occupancy,
+		policy,
 	)
 	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 

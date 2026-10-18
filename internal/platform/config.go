@@ -14,12 +14,19 @@ import (
 var ErrMissingConfig = errors.New("required configuration is missing")
 
 type Config struct {
-	Env     string
-	HTTP    HTTPConfig
-	DB      DBConfig
-	Log     LogConfig
-	Auth    AuthConfig
-	Version string
+	Env          string
+	HTTP         HTTPConfig
+	DB           DBConfig
+	Log          LogConfig
+	Auth         AuthConfig
+	Availability AvailabilityConfig
+	Version      string
+}
+
+type AvailabilityConfig struct {
+	SlotIncrement  time.Duration
+	MinimumNotice  time.Duration
+	MaximumHorizon time.Duration
 }
 
 type AuthConfig struct {
@@ -75,6 +82,9 @@ const (
 	defaultAuthAccessTokenTTL     = 15 * time.Minute
 	defaultAuthRefreshTokenTTL    = 168 * time.Hour
 	defaultAuthRateLimitPerMinute = 30
+	defaultAvailabilitySlot       = 15 * time.Minute
+	defaultAvailabilityNotice     = 2 * time.Hour
+	defaultAvailabilityHorizon    = 90 * 24 * time.Hour
 	minAuthAccessTokenSecretLen   = 32
 )
 
@@ -82,6 +92,7 @@ const (
 // Required variables that are missing are reported explicitly; no secret is
 // ever logged.
 func LoadConfig() (*Config, error) {
+	var err error
 	cfg := &Config{
 		Env:     firstNonEmpty(os.Getenv("APP_ENV"), defaultEnv),
 		Version: firstNonEmpty(os.Getenv("APP_VERSION"), defaultVersion),
@@ -149,6 +160,25 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("AUTH_RATE_LIMIT_PER_MIN must be positive")
 	}
 
+	cfg.Availability.SlotIncrement, err = parseAvailabilityDuration("AVAILABILITY_SLOT_INCREMENT", defaultAvailabilitySlot, false)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Availability.MinimumNotice, err = parseAvailabilityDuration("AVAILABILITY_MIN_NOTICE", defaultAvailabilityNotice, true)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Availability.MaximumHorizon, err = parseAvailabilityDuration("AVAILABILITY_MAX_HORIZON", defaultAvailabilityHorizon, false)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Availability.SlotIncrement%time.Minute != 0 {
+		return nil, fmt.Errorf("AVAILABILITY_SLOT_INCREMENT must be a whole number of minutes")
+	}
+	if cfg.Availability.MaximumHorizon <= cfg.Availability.MinimumNotice {
+		return nil, fmt.Errorf("AVAILABILITY_MAX_HORIZON must exceed AVAILABILITY_MIN_NOTICE")
+	}
+
 	return cfg, nil
 }
 
@@ -200,6 +230,21 @@ func parseInt(value string, fallback int, name string) int {
 		return fallback
 	}
 	return n
+}
+
+func parseAvailabilityDuration(name string, fallback time.Duration, allowZero bool) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration", name)
+	}
+	if duration < 0 || (!allowZero && duration == 0) {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return duration, nil
 }
 
 func parseDuration(value string, fallback time.Duration, name string) time.Duration {

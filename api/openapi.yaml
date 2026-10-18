@@ -320,6 +320,46 @@ paths:
           $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
+  /api/v1/providers/{providerID}/availability:
+    get:
+      summary: در دسترس بودن زمان‌ها برای ارائه‌دهنده و خدمت
+      description: بازه‌های زمانی موجود برای رزرو را برمی‌گرداند. پارامتر `date` تاریخ تقویمی میلادی در منطقه زمانی محلی ارائه‌دهنده است. بازه‌های بازگشتی بر اساس ساعت کاری، مرخصی، رزروهای موجود و بافر محاسبه شده‌اند. نتیجه مشورتی است و تضمین رزرو محسوب نمی‌شود.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProviderID'
+        - name: service_id
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}-\d{2}$'
+            example: "2025-03-15"
+            description: تاریخ میلادی در منطقه زمانی ارائه‌دهنده
+      responses:
+        '200':
+          description: بازه‌های موجود
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
 components:
   securitySchemes:
     bearerAuth:
@@ -348,6 +388,14 @@ components:
         default: 50
     ServiceID:
       name: serviceID
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ProviderID:
+      name: providerID
       in: path
       required: true
       schema:
@@ -485,3 +533,32 @@ components:
         next_cursor:
           type: [integer, 'null']
           format: int64
+    AvailabilityResponse:
+      type: object
+      required: [provider_id, service_id, date, time_zone, slots]
+      properties:
+        provider_id:
+          type: integer
+          format: int64
+        service_id:
+          type: integer
+          format: int64
+        date:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          example: "2025-03-15"
+        time_zone:
+          type: string
+          example: "Asia/Tehran"
+        slots:
+          type: array
+          items:
+            type: object
+            required: [start_at, end_at]
+            properties:
+              start_at:
+                type: string
+                format: date-time
+              end_at:
+                type: string
+                format: date-time

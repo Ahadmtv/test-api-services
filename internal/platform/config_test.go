@@ -74,10 +74,56 @@ func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	if cfg.Log.Level != "debug" || cfg.Log.Format != "text" {
 		t.Errorf("log config = %+v", cfg.Log)
 	}
+	if cfg.Availability.SlotIncrement != 15*time.Minute || cfg.Availability.MinimumNotice != 2*time.Hour || cfg.Availability.MaximumHorizon != 90*24*time.Hour {
+		t.Errorf("availability config = %+v", cfg.Availability)
+	}
 
 	dsn := cfg.DB.DSN()
 	if !strings.Contains(dsn, "postgres://tester:secret@localhost:5432/testdb?sslmode=disable") {
 		t.Errorf("unexpected DSN: %s", dsn)
+	}
+}
+
+func TestLoadConfigAvailabilityOverrides(t *testing.T) {
+	envWith(t, map[string]string{
+		"DB_USER":                     "tester",
+		"DB_NAME":                     "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET":    "01234567890123456789012345678901",
+		"AVAILABILITY_SLOT_INCREMENT": "20m",
+		"AVAILABILITY_MIN_NOTICE":     "0s",
+		"AVAILABILITY_MAX_HORIZON":    "48h",
+	})
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load custom availability config: %v", err)
+	}
+	if cfg.Availability.SlotIncrement != 20*time.Minute || cfg.Availability.MinimumNotice != 0 || cfg.Availability.MaximumHorizon != 48*time.Hour {
+		t.Fatalf("availability config = %+v", cfg.Availability)
+	}
+}
+
+func TestLoadConfigRejectsInvalidAvailabilitySettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+	}{
+		{"AVAILABILITY_SLOT_INCREMENT", "0m"},
+		{"AVAILABILITY_SLOT_INCREMENT", "90s"},
+		{"AVAILABILITY_MIN_NOTICE", "-1m"},
+		{"AVAILABILITY_MAX_HORIZON", "1h"},
+		{"AVAILABILITY_MAX_HORIZON", "invalid"},
+	} {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			t.Setenv("DB_USER", "tester")
+			t.Setenv("DB_NAME", "testdb")
+			t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
+			t.Setenv("AVAILABILITY_SLOT_INCREMENT", "")
+			t.Setenv("AVAILABILITY_MIN_NOTICE", "")
+			t.Setenv("AVAILABILITY_MAX_HORIZON", "")
+			t.Setenv(tc.name, tc.value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("expected invalid availability setting %s=%s", tc.name, tc.value)
+			}
+		})
 	}
 }
 
