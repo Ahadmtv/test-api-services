@@ -1,0 +1,189 @@
+package scheduling
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type WorkingInterval struct {
+	Weekday  int    `json:"weekday"`
+	OpensAt  string `json:"opens_at"`
+	ClosesAt string `json:"closes_at"`
+}
+
+type TimeOff struct {
+	ID       int64     `json:"id"`
+	Kind     string    `json:"kind"`
+	StartsAt time.Time `json:"starts_at"`
+	EndsAt   time.Time `json:"ends_at"`
+	Reason   string    `json:"reason"`
+}
+
+var ErrInvalidSchedule = errors.New("invalid schedule")
+var ErrProviderNotFound = errors.New("provider profile not found")
+var ErrInvalidTimeOff = errors.New("invalid time-off interval")
+
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+func ValidateWorkingHours(intervals []WorkingInterval) error {
+	byDay := make(map[int][]WorkingInterval)
+	for _, interval := range intervals {
+		if interval.Weekday < 1 || interval.Weekday > 7 {
+			return ErrInvalidSchedule
+		}
+		open, err := time.Parse("15:04", interval.OpensAt)
+		if err != nil {
+			return ErrInvalidSchedule
+		}
+		close, err := time.Parse("15:04", interval.ClosesAt)
+		if err != nil || !open.Before(close) {
+			return ErrInvalidSchedule
+		}
+		byDay[interval.Weekday] = append(byDay[interval.Weekday], interval)
+	}
+	for _, day := range byDay {
+		sort.Slice(day, func(i, j int) bool { return day[i].OpensAt < day[j].OpensAt })
+		for i := 1; i < len(day); i++ {
+			if day[i].OpensAt < day[i-1].ClosesAt {
+				return ErrInvalidSchedule
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) GetWorkingHours(ctx context.Context, providerID int64) ([]WorkingInterval, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT weekday, to_char(opens_at, 'HH24:MI'), to_char(closes_at, 'HH24:MI')
+		FROM weekly_working_hours WHERE provider_id = $1
+		ORDER BY weekday, opens_at
+	`, providerID)
+	if err != nil {
+		return nil, fmt.Errorf("get weekly working hours: %w", err)
+	}
+	defer rows.Close()
+	intervals := make([]WorkingInterval, 0)
+	for rows.Next() {
+		var interval WorkingInterval
+		if err := rows.Scan(&interval.Weekday, &interval.OpensAt, &interval.ClosesAt); err != nil {
+			return nil, err
+		}
+		intervals = append(intervals, interval)
+	}
+	return intervals, rows.Err()
+}
+
+func (s *Store) PutWorkingHours(ctx context.Context, providerID int64, intervals []WorkingInterval) error {
+	if err := ValidateWorkingHours(intervals); err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin weekly hours update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var lockedProviderID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM provider_profiles WHERE provider_id = $1 FOR UPDATE`, providerID).Scan(&lockedProviderID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrProviderNotFound
+	} else if err != nil {
+		return fmt.Errorf("lock provider profile: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM weekly_working_hours WHERE provider_id = $1`, providerID); err != nil {
+		return fmt.Errorf("replace weekly working hours: %w", err)
+	}
+	for _, interval := range intervals {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO weekly_working_hours (provider_id, weekday, opens_at, closes_at)
+			VALUES ($1, $2, $3::time, $4::time)
+		`, providerID, interval.Weekday, interval.OpensAt, interval.ClosesAt); err != nil {
+			return fmt.Errorf("insert weekly working hours: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit weekly hours update: %w", err)
+	}
+	return nil
+}
+
+func ValidateTimeOff(kind string, startsAt, endsAt time.Time, reason string) error {
+	if (kind != "time_off" && kind != "blocked") || !startsAt.Before(endsAt) || len([]rune(reason)) > 500 {
+		return ErrInvalidTimeOff
+	}
+	return nil
+}
+
+func (s *Store) CreateTimeOff(ctx context.Context, providerID int64, kind string, startsAt, endsAt time.Time, reason string) (*TimeOff, error) {
+	if err := ValidateTimeOff(kind, startsAt, endsAt, reason); err != nil {
+		return nil, err
+	}
+	startsAt = startsAt.UTC()
+	endsAt = endsAt.UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin time-off creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var lockedProviderID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM provider_profiles WHERE provider_id = $1 FOR UPDATE`, providerID).Scan(&lockedProviderID); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProviderNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("lock provider profile: %w", err)
+	}
+	var item TimeOff
+	err = tx.QueryRow(ctx, `
+		INSERT INTO provider_time_off (provider_id, kind, starts_at, ends_at, reason)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, kind, starts_at, ends_at, reason
+	`, providerID, kind, startsAt, endsAt, reason).Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason)
+	if err != nil {
+		return nil, fmt.Errorf("create provider time-off interval: %w", err)
+	}
+	item.StartsAt = item.StartsAt.UTC()
+	item.EndsAt = item.EndsAt.UTC()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit time-off creation: %w", err)
+	}
+	return &item, nil
+}
+
+func (s *Store) ListTimeOff(ctx context.Context, providerID, after int64, limit int) ([]TimeOff, bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, kind, starts_at, ends_at, reason
+		FROM provider_time_off WHERE provider_id = $1 AND id > $2
+		ORDER BY id LIMIT $3
+	`, providerID, after, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("list provider time-off: %w", err)
+	}
+	defer rows.Close()
+	items := make([]TimeOff, 0, limit)
+	for rows.Next() {
+		var item TimeOff
+		if err := rows.Scan(&item.ID, &item.Kind, &item.StartsAt, &item.EndsAt, &item.Reason); err != nil {
+			return nil, false, err
+		}
+		item.StartsAt = item.StartsAt.UTC()
+		item.EndsAt = item.EndsAt.UTC()
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
+}

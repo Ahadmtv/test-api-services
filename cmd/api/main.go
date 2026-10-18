@@ -14,8 +14,12 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"test-api/internal/auth"
+	"test-api/internal/catalog"
 	"test-api/internal/identity"
 	"test-api/internal/platform"
+	"test-api/internal/providerapi"
+	"test-api/internal/providers"
+	"test-api/internal/scheduling"
 )
 
 func main() {
@@ -63,6 +67,12 @@ func run(ctx context.Context, args []string) error {
 	handler := auth.NewHandler(service, logger, rateLimiter, int64(cfg.Auth.AccessTokenTTL.Seconds()))
 
 	app := platform.NewApp(cfg, logger, db)
+	providerHandler := providerapi.NewHandler(
+		providers.NewService(db.Pool()),
+		catalog.NewStore(db.Pool()),
+		scheduling.NewStore(db.Pool()),
+	)
+	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 
 	authGroup := app.Fiber().Group("/api/v1/auth")
 	authGroup.Post("/register", handler.Register)
@@ -74,7 +84,7 @@ func run(ctx context.Context, args []string) error {
 	meGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
 	meGroup.Get("/me", handler.Me)
 
-	// Example role-based route (admin only) — no business logic yet.
+	// Admin-only diagnostic route.
 	adminGroup := app.Fiber().Group("/api/v1/admin")
 	adminGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
 	adminGroup.Use(auth.RequireRoles("admin"))

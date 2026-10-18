@@ -1,6 +1,9 @@
 # Binaries
 /bin
 /api
+!/api/
+/api/*
+!/api/openapi.yaml
 *.exe
 
 # Go

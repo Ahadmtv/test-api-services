@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	requestIDKey       = "request_id"
+	RequestIDKey       = "request_id"
 	requestIDHeader    = "X-Request-ID"
 	problemContentType = "application/problem+json"
 
@@ -33,7 +33,7 @@ type problemResponse struct {
 
 // RequestID ensures every request carries an X-Request-ID, generating one when
 // the client did not provide it. The ID is available through
-// c.Locals(requestIDKey) and echoed in the response header.
+// c.Locals(RequestIDKey) and echoed in the response header.
 func RequestID() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		id := c.Get(requestIDHeader)
@@ -41,7 +41,7 @@ func RequestID() fiber.Handler {
 			id = newRequestID()
 		}
 		c.Set(requestIDHeader, id)
-		c.Locals(requestIDKey, id)
+		c.Locals(RequestIDKey, id)
 		return c.Next()
 	}
 }
@@ -133,7 +133,7 @@ func writeProblem(c fiber.Ctx, status int, appErr *AppError) error {
 }
 
 func requestID(c fiber.Ctx) string {
-	if id, ok := c.Locals(requestIDKey).(string); ok {
+	if id, ok := c.Locals(RequestIDKey).(string); ok {
 		return id
 	}
 	return c.Get(requestIDHeader)

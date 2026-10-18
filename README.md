@@ -1,8 +1,8 @@
 # SAMA — سامانه رزرو خدمات
 
 سامانه رزرو خدمات با نقش‌های مشتری، ارائه‌دهنده خدمت و مدیر.
-در این مرحله (مرحله 02) احراز هویت، حساب‌های کاربری و مجوزها پیاده شده‌اند.
-منطق رزرو، کیف پول و پرداخت در مراحل آینده اضافه می‌شود.
+مرحله‌های 02 و 03 شامل احراز هویت، حساب‌های کاربری و مجوزها، نمایه ارائه‌دهنده، کاتالوگ خدمات و برنامه هفتگی/مرخصی هستند.
+ایجاد رزرو، کیف پول و پرداخت در مراحل آینده اضافه می‌شوند.
 
 ## پیش‌نیازها
 
@@ -84,13 +84,45 @@ curl -X GET http://localhost:8080/api/v1/me \
   -H 'Authorization: Bearer <access_token>'
 ```
 
-### ۵) بازگردانی migration (اختیاری)
+### ۵) مسیرهای ارائه‌دهنده (مرحله 03)
+
+مسیرهای مدیریتی ارائه‌دهنده به access token با نقش `provider` نیاز دارند. نقش ارائه‌دهنده در ثبت‌نام عمومی صادر نمی‌شود و باید از فرایند تأمین دسترسی تحت کنترل مدیر اعطا شود؛ این مرحله endpoint اعطای نقش اضافه نمی‌کند. نمایه تا زمان تأیید مدیر در کاتالوگ عمومی نمایش داده نمی‌شود.
+
+```bash
+# ایجاد یا به‌روزرسانی نمایه؛ منطقه زمانی پیش‌فرض Asia/Tehran است
+curl -X PUT http://localhost:8080/api/v1/provider/profile \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"display_name":"مرکز خدمات","description":"توضیح","time_zone":"Asia/Tehran","is_active":true}'
+
+# ثبت خدمت با مبلغ صحیح ریال
+curl -X POST http://localhost:8080/api/v1/provider/services \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"مشاوره","description":"جلسه","duration_minutes":45,"price_irr":2500000,"buffer_minutes":10,"is_active":true}'
+
+# دو بازه در یک روز؛ روز ISO-8601 است (دوشنبه 1 تا یکشنبه 7)
+curl -X PUT http://localhost:8080/api/v1/provider/working-hours \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"intervals":[{"weekday":1,"opens_at":"09:00","closes_at":"12:00"},{"weekday":1,"opens_at":"13:00","closes_at":"17:00"}]}'
+
+# ثبت بازه مسدود با زمان RFC 3339 دارای offset
+curl -X POST http://localhost:8080/api/v1/provider/time-off \
+  -H 'Authorization: Bearer <access_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"blocked","starts_at":"2030-03-20T09:00:00+03:30","ends_at":"2030-03-20T10:00:00+03:30","reason":"عدم حضور"}'
+```
+
+ساعات هفتگی زمان دیواری محلی‌اند، نه UTC. بازه‌های ساعات کاری نیمه‌باز `[شروع، پایان)`، در یک روز و غیرهم‌پوشان هستند؛ بازه عبوری از نیمه‌شب باید به دو روز جدا شکسته شود. تغییر منطقه زمانی، ساعت‌های دیواری موجود را در منطقه تازه تفسیر می‌کند و آن‌ها را به زمان دیگری تبدیل نمی‌کند. مرخصی/مسدودی با ابتدا و انتهای لحظه‌ای در `TIMESTAMPTZ` و به UTC ذخیره می‌شود. قرارداد کامل در `api/openapi.yaml` است.
+
+### ۶) بازگردانی migration (اختیاری)
 
 ```bash
 go run ./cmd/api migrate-down
 ```
 
-## امنیت (مرحله 02)
+## امنیت (مرحله‌های 02 و 03)
 
 - رمز عبور‌ها با Argon2id هش شده و متنخام رمز عبور در پایگاه داده ذخیره نمی‌شود.
 - توکنRefreshها هش شده در جدول `refresh_tokens` ذخیره می‌شوند؛ plaintext هرگز ثبت نمی‌شود.
@@ -108,11 +140,10 @@ go run ./cmd/api migrate-down
 go test ./...
 ```
 
-تست‌های واحد روی متغیر محیطی اجرا می‌شوند. تست‌های یکپارچه migration و حساب کاربری نیاز به متغیر
-`DATABASE_URL` دارند و در غیر این صورت رد می‌شوند (skip).
+تست‌های یکپارچه migration، حساب کاربری و API مرحله 03 به PostgreSQL و متغیر `DATABASE_URL` نیاز دارند و در غیر این صورت رد می‌شوند (skip).
 
 ```bash
-go test ./... -run TestServiceIntegration -v   # نیاز به DATABASE_URL
+go test ./... -run 'Test(ServiceIntegration|Stage03APIIntegration|MigrationsIntegration)' -v   # نیاز به DATABASE_URL
 ```
 
 ## ساخت تصویر Docker
@@ -126,6 +157,6 @@ docker build -t test-api:0.2.0 .
 کیفلت داخلی فقط دفتر حسابداری است و مجوز نگهداری وجه مشتری یا تسویه بانکی ایجاد نمی‌کند.
 تأیید حقوقی، مالیاتی، احراز هویت و شرایط ارائه‌دهنده پرداخت (Zarinpal Sandbox) پیش از عرضه واقعی الزامی است.
 
-## esperanza مراحل آینده
+## مراحل آینده
 
-رزرو، قفل وجه، کیف پول، استیمنٹ و پرداخت (مراحل ۰۳ تا ۰۶) در این مرحله پیاده‌سازی نشده‌اند.
+ایجاد رزرو، snapshot تاریخی نام/مدت/قیمت/ارز و سیاست buffer، کیف پول، دفترکل، تسویه و پرداخت هنوز پیاده‌سازی نشده‌اند. هنگام ایجاد رزرو باید مقادیر توافق‌شده خدمت در snapshot مستقل رزرو ثبت شوند؛ ویرایش خدمت نباید snapshot رزرو را تغییر دهد.

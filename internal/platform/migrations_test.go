@@ -2,6 +2,8 @@ package platform
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -61,9 +63,30 @@ func TestMigrationsIntegration(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	adminPool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect to database: %v", err)
+	}
+	defer adminPool.Close()
+
+	schemaBytes := make([]byte, 8)
+	if _, err := rand.Read(schemaBytes); err != nil {
+		t.Fatalf("generate test schema: %v", err)
+	}
+	schema := "migration_test_" + hex.EncodeToString(schemaBytes)
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	defer adminPool.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatalf("connect to test schema: %v", err)
 	}
 	defer pool.Close()
 
@@ -86,8 +109,8 @@ func TestMigrationsIntegration(t *testing.T) {
 			applied++
 		}
 	}
-	if applied == 0 {
-		t.Error("expected at least one applied migration")
+	if applied != len(statuses) {
+		t.Fatalf("applied migrations = %d, want %d", applied, len(statuses))
 	}
 
 	if err := migrator.Down(ctx); err != nil {
@@ -99,8 +122,11 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Fatalf("migrate status after down: %v", err)
 	}
 	for _, s := range statuses {
-		if s.Applied {
-			t.Errorf("migration %d should be reverted", s.Version)
+		if s.Version == statuses[len(statuses)-1].Version && s.Applied {
+			t.Errorf("latest migration %d should be reverted", s.Version)
 		}
+	}
+	if err := migrator.Up(ctx); err != nil {
+		t.Fatalf("reapply latest migration: %v", err)
 	}
 }
