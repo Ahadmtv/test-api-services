@@ -98,7 +98,7 @@ func (s *Service) SetVerificationStatus(ctx context.Context, actorID, providerID
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_events (actor_user_id, action, target_type, target_id, request_id, metadata)
-		VALUES ($1, 'provider.verification.updated', 'provider_profile', $2, $3, jsonb_build_object('verification_status', $4))
+		VALUES ($1, 'provider.verification.updated', 'provider_profile', $2, $3, jsonb_build_object('verification_status', $4::text))
 	`, actorID, providerID, requestID, status); err != nil {
 		return nil, fmt.Errorf("audit provider verification: %w", err)
 	}

@@ -7,6 +7,10 @@ UPDATE bookings
 SET status = 'cancelled', updated_at = now()
 WHERE status = 'pending_provider_acceptance';
 
+-- Fire any pending deferrable trigger events before the ALTER TABLE statements;
+-- during a clean upgrade there is nothing to fire and this is a no-op.
+SET CONSTRAINTS ALL IMMEDIATE;
+
 DROP INDEX idx_bookings_pending_expiration;
 ALTER TABLE bookings RENAME COLUMN expires_at TO legacy_expires_at;
 ALTER TABLE bookings ALTER COLUMN legacy_expires_at DROP NOT NULL;
@@ -22,7 +26,7 @@ ALTER TABLE bookings
     ADD CONSTRAINT bookings_no_overlapping_active_provider_slots
     EXCLUDE USING gist (
         provider_id WITH =,
-        tstzrange(starts_at, ends_at + buffer_minutes * INTERVAL '1 minute', '[)') WITH &&
+        booking_service_slot_range(starts_at, ends_at, buffer_minutes) WITH &&
     ) WHERE (status IN ('confirmed', 'in_progress'));
 
 CREATE OR REPLACE FUNCTION enforce_booking_state_transition() RETURNS trigger AS $$

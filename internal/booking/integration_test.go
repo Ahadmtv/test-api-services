@@ -324,11 +324,11 @@ func TestInactiveServiceCannotBeBooked(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("invalid service left %d bookings; want none", count)
 	}
-	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM idempotency_records`).Scan(&count); err != nil {
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM idempotency_records WHERE operation = 'booking.create'`).Scan(&count); err != nil {
 		t.Fatalf("count idempotency records after rejected request: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("invalid service left %d idempotency records; want none", count)
+		t.Fatalf("invalid service left %d booking.create idempotency records; want none", count)
 	}
 }
 

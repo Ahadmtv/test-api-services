@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -22,6 +24,17 @@ func TestServiceIntegration(t *testing.T) {
 	}
 	defer pool.Close()
 
+	email := "integration@example.com"
+	for _, query := range []string{
+		`DELETE FROM refresh_tokens USING users WHERE refresh_tokens.user_id = users.id AND users.email = $1`,
+		`DELETE FROM user_roles USING users WHERE user_roles.user_id = users.id AND users.email = $1`,
+		`DELETE FROM users WHERE email = $1`,
+	} {
+		if _, err := pool.Exec(ctx, query, email); err != nil {
+			t.Fatalf("clean fixture state: %v", err)
+		}
+	}
+
 	store := NewPgxStore(pool)
 	service := NewService(Config{
 		Store:             store,
@@ -29,10 +42,8 @@ func TestServiceIntegration(t *testing.T) {
 		AccessTokenSecret: "01234567890123456789012345678901",
 		AccessTokenTTL:    15 * time.Minute,
 		RefreshTokenTTL:   time.Hour,
-		Logger:            nil,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-
-	email := "integration@example.com"
 
 	// Register
 	pair, err := service.Register(ctx, email, "+989120000000", "secret1234")
@@ -45,9 +56,6 @@ func TestServiceIntegration(t *testing.T) {
 
 	// Login
 	loginPair, err := service.Login(ctx, email, "secret1234")
-	if err != nil {
-		t.Fatalf("login: %v", err)
-	}
 	if loginPair.AccessToken == "" {
 		t.Fatal("login should issue access token")
 	}

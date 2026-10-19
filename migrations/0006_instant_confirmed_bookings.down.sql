@@ -38,7 +38,7 @@ ALTER TABLE bookings
     ADD CONSTRAINT bookings_no_overlapping_active_provider_slots
     EXCLUDE USING gist (
         provider_id WITH =,
-        tstzrange(starts_at, ends_at + buffer_minutes * INTERVAL '1 minute', '[)') WITH &&
+        booking_service_slot_range(starts_at, ends_at, buffer_minutes) WITH &&
     ) WHERE (status IN ('pending_provider_acceptance', 'confirmed', 'in_progress'));
 
 ALTER TABLE bookings DROP CONSTRAINT bookings_status_check;

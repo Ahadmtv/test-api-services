@@ -438,7 +438,7 @@ paths:
           description: مقدار بازگشتی gateway؛ برای اعتباردهی به آن اعتماد نمی‌شود
           schema: { type: string, maxLength: 32 }
       responses:
-        '204': { description: callback پردازش شد یا نتیجه قبلی حفظ شد }
+        '204': { description: callback پردازش شد یا نتیجه قبلی حفظ شد؛ بدنه‌ای برای نمایش به کاربر برنمی‌گردد و صفحه نتیجه فرانت‌اند تصمیم جداگانه باز است }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }

@@ -22,8 +22,8 @@ const (
 type ZarinpalEnvironment string
 
 const (
-	ZarinpalSandbox     ZarinpalEnvironment = "sandbox"
-	ZarinpalProduction  ZarinpalEnvironment = "production"
+	ZarinpalSandbox    ZarinpalEnvironment = "sandbox"
+	ZarinpalProduction ZarinpalEnvironment = "production"
 )
 
 type ZarinpalGateway struct {

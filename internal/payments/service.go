@@ -18,11 +18,11 @@ import (
 const OfficialMinimumAmountIRR int64 = 10_000
 
 var (
-	ErrInvalidInput      = errors.New("invalid payment input")
-	ErrPaymentNotFound   = errors.New("payment not found")
-	ErrPaymentConflict   = errors.New("payment state conflict")
-	ErrInvalidAuthority  = errors.New("invalid payment authority")
-	ErrPaymentMismatch   = errors.New("verified payment does not match local payment")
+	ErrInvalidInput     = errors.New("invalid payment input")
+	ErrPaymentNotFound  = errors.New("payment not found")
+	ErrPaymentConflict  = errors.New("payment state conflict")
+	ErrInvalidAuthority = errors.New("invalid payment authority")
+	ErrPaymentMismatch  = errors.New("verified payment does not match local payment")
 )
 
 type Payment struct {
@@ -233,6 +233,36 @@ func (s *Service) ReconcileUnknown(ctx context.Context, limit int) (int, error) 
 		}
 	}
 	return resolved, nil
+}
+
+// UnresolvedReport makes payment attempts that cannot be resolved automatically
+// visible to operators.
+type UnresolvedReport struct {
+	PendingWithAuthority    int64 `json:"pending_with_authority"`
+	PendingWithoutAuthority int64 `json:"pending_without_authority"`
+	UnknownWithAuthority    int64 `json:"unknown_with_authority"`
+	UnknownWithoutAuthority int64 `json:"unknown_without_authority"`
+}
+
+// UnresolvedReport counts payment attempts still awaiting an outcome. Zarinpal
+// offers no documented way to identify attempts whose authority was never
+// stored, so those rows stay unresolved until an operator reconciles them
+// manually; the reconciliation command never credits or fails them.
+func (s *Service) UnresolvedReport(ctx context.Context) (UnresolvedReport, error) {
+	var report UnresolvedReport
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(count(*) FILTER (WHERE status = 'pending' AND authority IS NOT NULL), 0),
+			COALESCE(count(*) FILTER (WHERE status = 'pending' AND authority IS NULL), 0),
+			COALESCE(count(*) FILTER (WHERE status = 'verification_unknown' AND authority IS NOT NULL), 0),
+			COALESCE(count(*) FILTER (WHERE status = 'verification_unknown' AND authority IS NULL), 0)
+		FROM payment_attempts
+		WHERE status IN ('pending', 'verification_unknown')
+	`).Scan(&report.PendingWithAuthority, &report.PendingWithoutAuthority, &report.UnknownWithAuthority, &report.UnknownWithoutAuthority)
+	if err != nil {
+		return UnresolvedReport{}, fmt.Errorf("summarize unresolved payments: %w", err)
+	}
+	return report, nil
 }
 
 func (s *Service) finishVerification(ctx context.Context, paymentID int64, authority string, result Verification, requestID string) error {

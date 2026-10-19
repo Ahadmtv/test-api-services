@@ -63,7 +63,14 @@ func run(ctx context.Context, args []string) error {
 			if err != nil {
 				return fmt.Errorf("reconcile uncertain payments: %w", err)
 			}
-			logger.Info("payment reconciliation completed", "resolved", resolved)
+			report, err := service.UnresolvedReport(ctx)
+			if err != nil {
+				return fmt.Errorf("summarize unresolved payments: %w", err)
+			}
+			logger.Info("payment reconciliation completed",
+				"resolved", resolved,
+				"unresolved", report,
+			)
 			return nil
 		}
 		return runMigration(ctx, args[0], db, logger)

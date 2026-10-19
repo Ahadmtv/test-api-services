@@ -7,4 +7,5 @@ DROP TRIGGER bookings_state_transition_guard ON bookings;
 DROP FUNCTION enforce_booking_state_transition();
 DROP TABLE booking_state_transitions;
 DROP TABLE bookings;
+DROP FUNCTION booking_service_slot_range(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER);
 ALTER TABLE services DROP CONSTRAINT services_provider_id_id_key;

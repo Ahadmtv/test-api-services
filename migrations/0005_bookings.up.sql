@@ -3,6 +3,21 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 ALTER TABLE services
     ADD CONSTRAINT services_provider_id_id_key UNIQUE (provider_id, id);
 
+-- Adding a whole number of minutes to an absolute instant is deterministic and
+-- independent of time-zone settings (only month/day interval fields depend on the
+-- calendar), so this slot-range helper is genuinely IMMUTABLE for index use.
+CREATE FUNCTION booking_service_slot_range(
+    starts_at TIMESTAMPTZ,
+    ends_at TIMESTAMPTZ,
+    buffer_minutes INTEGER
+) RETURNS tstzrange
+    LANGUAGE sql
+    IMMUTABLE STRICT
+    PARALLEL SAFE
+    AS $$
+        SELECT tstzrange(starts_at, ends_at + buffer_minutes * INTERVAL '1 minute', '[)')
+    $$;
+
 CREATE TABLE bookings (
     id BIGSERIAL PRIMARY KEY,
     client_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -26,7 +41,7 @@ CREATE TABLE bookings (
     CONSTRAINT bookings_no_overlapping_active_provider_slots
         EXCLUDE USING gist (
             provider_id WITH =,
-            tstzrange(starts_at, ends_at + buffer_minutes * INTERVAL '1 minute', '[)') WITH &&
+            booking_service_slot_range(starts_at, ends_at, buffer_minutes) WITH &&
         ) WHERE (status IN ('pending_provider_acceptance', 'confirmed', 'in_progress'))
 );
 

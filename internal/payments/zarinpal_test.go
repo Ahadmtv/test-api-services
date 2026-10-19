@@ -93,6 +93,22 @@ func TestZarinpalUnknownOutcomesAreNotAccepted(t *testing.T) {
 	}
 }
 
+func TestZarinpalVerifyAcceptsAlreadyVerifiedResponseWithReference(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"code":101,"ref_id":555111}}`))
+	}))
+	defer server.Close()
+
+	gateway := testGateway(server)
+	result, err := gateway.Verify(context.Background(), VerifyRequest{Authority: "A0000000000000000000000000006qpmlj8d", AmountIRR: 10_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Approved || result.ReferenceID != "555111" || result.GatewayCode != "101" {
+		t.Fatalf("verification=%+v", result)
+	}
+}
+
 func TestZarinpalTransportErrorsAreUnknown(t *testing.T) {
 	t.Run("http error", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))

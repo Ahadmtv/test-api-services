@@ -206,6 +206,23 @@ func TestPaymentCreateUnknownOutcomeIsNotRetried(t *testing.T) {
 	if err != nil || retry.ID != payment.ID || retry.Status != "verification_unknown" || redirect != "" || f.gateway.CreateCalls != 1 {
 		t.Fatalf("retry=%+v redirect=%q create calls=%d error=%v", retry, redirect, f.gateway.CreateCalls, err)
 	}
+	report, err := f.service.UnresolvedReport(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.UnknownWithoutAuthority != 1 || report.UnknownWithAuthority != 0 || report.PendingWithoutAuthority != 0 || report.PendingWithAuthority != 0 {
+		t.Fatalf("unresolved report=%+v", report)
+	}
+}
+
+func TestPaymentStartRejectsAmountBelowDocumentedMinimum(t *testing.T) {
+	f := newPaymentFixture(t)
+	if _, _, err := f.service.Start(context.Background(), f.userID, OfficialMinimumAmountIRR-1, "small-amount", "request-small-amount"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("below-minimum amount error=%v", err)
+	}
+	if f.gateway.CreateCalls != 0 {
+		t.Fatalf("gateway was called create=%d", f.gateway.CreateCalls)
+	}
 }
 
 func TestPaymentStartIdempotencyAndAuthorization(t *testing.T) {

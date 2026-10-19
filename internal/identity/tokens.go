@@ -85,7 +85,7 @@ func GenerateRefreshToken() (plaintext, hash string, err error) {
 	}
 	plaintext = hex.EncodeToString(buf)
 
-	sum := sha256.Sum256(buf)
+	sum := sha256.Sum256([]byte(plaintext))
 	hash = base64.RawStdEncoding.EncodeToString(sum[:])
 	return plaintext, hash, nil
 }
