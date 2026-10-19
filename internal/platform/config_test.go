@@ -65,6 +65,9 @@ func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	if cfg.HTTP.ReadTimeout != 10*time.Second {
 		t.Errorf("read timeout = %v", cfg.HTTP.ReadTimeout)
 	}
+	if cfg.HTTP.BodyLimit != defaultHTTPBodyLimit {
+		t.Errorf("http body limit = %d, want %d", cfg.HTTP.BodyLimit, defaultHTTPBodyLimit)
+	}
 	if cfg.DB.User != "tester" || cfg.DB.Name != "testdb" || cfg.DB.Password != "secret" {
 		t.Errorf("db config = %+v", cfg.DB)
 	}

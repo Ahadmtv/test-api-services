@@ -26,8 +26,9 @@ type Store interface {
 	CreateUser(ctx context.Context, tx pgx.Tx, email string, phone *string, passwordHash string) (int64, error)
 	AddRole(ctx context.Context, tx pgx.Tx, userID int64, role string) error
 	FindRefreshToken(ctx context.Context, tokenHash string) (*RefreshRow, error)
+	FindRefreshTokenForUpdate(ctx context.Context, tx pgx.Tx, tokenHash string) (*RefreshRow, error)
 	InsertRefreshToken(ctx context.Context, tx pgx.Tx, userID int64, tokenHash string, expiresAt time.Time) error
-	RevokeRefreshToken(ctx context.Context, tx pgx.Tx, tokenHash string, replacedBy string) error
+	RevokeRefreshToken(ctx context.Context, tx pgx.Tx, tokenHash string, replacedBy string) (int64, error)
 	RevokeAllUserTokens(ctx context.Context, tx pgx.Tx, userID int64) error
 	BeginTx(ctx context.Context) (pgx.Tx, error)
 }
@@ -216,6 +217,35 @@ func (s *pgxStore) FindRefreshToken(ctx context.Context, tokenHash string) (*Ref
 	}, nil
 }
 
+func (s *pgxStore) FindRefreshTokenForUpdate(ctx context.Context, tx pgx.Tx, tokenHash string) (*RefreshRow, error) {
+	var (
+		id         int64
+		userID     int64
+		tokenHashS string
+		expiresAt  time.Time
+		revokedAt  sql.NullTime
+		replacedBy sql.NullString
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by
+		FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE
+	`, tokenHash).Scan(&id, &userID, &tokenHashS, &expiresAt, &revokedAt, &replacedBy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRefreshTokenNotFound
+		}
+		return nil, fmt.Errorf("lock refresh token: %w", err)
+	}
+	return &RefreshRow{
+		ID:         id,
+		UserID:     userID,
+		TokenHash:  tokenHashS,
+		ExpiresAt:  expiresAt,
+		RevokedAt:  revokedAt,
+		ReplacedBy: replacedBy,
+	}, nil
+}
+
 func (s *pgxStore) InsertRefreshToken(ctx context.Context, tx pgx.Tx, userID int64, tokenHash string, expiresAt time.Time) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -224,17 +254,20 @@ func (s *pgxStore) InsertRefreshToken(ctx context.Context, tx pgx.Tx, userID int
 	return err
 }
 
-func (s *pgxStore) RevokeRefreshToken(ctx context.Context, tx pgx.Tx, tokenHash string, replacedBy string) error {
+func (s *pgxStore) RevokeRefreshToken(ctx context.Context, tx pgx.Tx, tokenHash string, replacedBy string) (int64, error) {
 	arg := sql.NullString{}
 	if replacedBy != "" {
 		arg = sql.NullString{String: replacedBy, Valid: true}
 	}
-	_, err := tx.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 		UPDATE refresh_tokens
 		SET revoked_at = now(), replaced_by = $2
 		WHERE token_hash = $1 AND revoked_at IS NULL
 	`, tokenHash, arg)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 func (s *pgxStore) RevokeAllUserTokens(ctx context.Context, tx pgx.Tx, userID int64) error {

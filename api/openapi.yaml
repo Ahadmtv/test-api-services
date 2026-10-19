@@ -6,6 +6,109 @@ info:
 servers:
   - url: /
 paths:
+  /api/v1/auth/register:
+    post:
+      summary: ثبت‌نام مشتری
+      description: حساب جدید با نقش پیش‌فرض `client` ساخته می‌شود؛ نقش `provider` یا `admin` در ثبت‌نام عمومی صادر نمی‌شود. پیام خطا برای ایمیل تکراری و ورودی نامعتبر یکسان است تا شمارش حساب ممکن نباشد و این مسیر محدودیت نرخ دارد.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRegisterInput'
+      responses:
+        '201':
+          description: حساب ایجاد شد
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /api/v1/auth/login:
+    post:
+      summary: ورود
+      description: اعتبارنامه‌ها را بررسی و جفت توکن دسترسی و Refresh برمی‌گرداند. پاسخ برای کاربر ناشناخته و رمز نادرست یکسان است و این مسیر محدودیت نرخ دارد.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthLoginInput'
+      responses:
+        '200':
+          description: ورود موفق
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /api/v1/auth/refresh:
+    post:
+      summary: تایید مجدد و چرخش توکن Refresh
+      description: توکن Refresh ارائه‌شده در یک تراکنش مصرف، لغو و با توکن تازه جایگزین می‌شود؛ نشست تازه ایمیل و نقش‌های جاری کاربر را حفظ می‌کند. استفاده مجدد از توکن چرخیده‌شده به‌عنوان replay شناسایی می‌شود و همه نشست‌های فعال کاربر لغو می‌شوند.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRefreshInput'
+      responses:
+        '200':
+          description: جفت توکن تازه
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /api/v1/auth/logout:
+    post:
+      summary: خروج
+      description: توکن Refresh ارائه‌شده را لغو می‌کند. فراخوانی با توکن نامعتبر یا غایب هم پاسخ موفق یکسان می‌دهد و وضعیت نشست را افشا نمی‌کند.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRefreshInput'
+      responses:
+        '200':
+          description: خروج انجام شد
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          $ref: '#/components/responses/Problem'
+  /api/v1/me:
+    get:
+      summary: نمایه کاربر جاری
+      description: نمایه کاربر احرازشده را از روی شناسه داخل توکن دسترسی برمی‌گرداند؛ هویت و نقش‌ها از سمت سرور تعیین می‌شوند.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: نمایه کاربر
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Problem'
   /api/v1/services:
     get:
       summary: فهرست خدمات فعال و تأییدشده
@@ -977,6 +1080,49 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    AuthRegisterInput:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        phone: { type: string }
+        password: { type: string, minLength: 8 }
+    AuthLoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+    AuthRefreshInput:
+      type: object
+      properties:
+        refresh_token: { type: string }
+    OperationResult:
+      type: object
+      required: [status, message]
+      properties:
+        status: { type: string }
+        message: { type: string }
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in]
+      properties:
+        access_token: { type: string }
+        refresh_token:
+          type: string
+          description: توکن Refresh فقط یک‌بار در همین پاسخ به‌صورت متن‌خام برگردانده می‌شود و در پایگاه داده هش می‌شود.
+        expires_in: { type: integer, format: int64, description: عمر توکن دسترسی به ثانیه }
+    User:
+      type: object
+      required: [id, email, is_active, roles]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string, format: email }
+        phone: { type: [string, 'null'] }
+        is_active: { type: boolean }
+        roles:
+          type: array
+          items: { type: string }
     Problem:
       type: object
       required: [type, title, status, code, request_id]

@@ -23,7 +23,7 @@ type Balance struct {
 	AvailableIRR        int64  `json:"available_irr"`
 	HeldIRR             int64  `json:"held_irr"`
 	ProviderEarningsIRR int64  `json:"provider_earnings_irr"`
-	PayoutReservedIRR   int64  `json:"payout_reserved_irr"`
+	PayoutReservedIRR   int64  `json:"provider_payout_reserved_irr"`
 	Currency            string `json:"currency"`
 }
 

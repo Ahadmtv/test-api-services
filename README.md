@@ -25,6 +25,7 @@ cp .env.example .env
 | `AUTH_REFRESH_TOKEN_TTL` | عمر توکنRefresh | ۱۶۸ ساعت |
 | `AUTH_RATE_LIMIT_PER_MIN` | محدودیت نرخ برای مسیرهای احراز هویت (در هر دقیقه، بر اساس IP) | ۳۰ |
 | `BOOKING_CANCELLATION_CUTOFF` | فاصله لازم پیش از آغاز خدمت برای لغو رزرو تأییدشده | صفر |
+| `HTTP_BODY_LIMIT` | حداکثر اندازه بدنه درخواست HTTP به بایت (باید عددی مثبت باشد) | ۱۰۴۸۵۷۶ (۱ مگابایت) |
 
 رازهای حقیقی (مثل `DB_PASSWORD` و `AUTH_ACCESS_TOKEN_SECRET`) هرگز در مخزن ثبت نشود.
 
@@ -171,7 +172,7 @@ curl -X POST http://localhost:8080/api/v1/provider/bookings/1/start \\
   -H 'Authorization: Bearer <provider_access_token>'
 ```
 
-رزرو موفق بلافاصله با وضعیت `confirmed` ثبت می‌شود و برای تأیید دستی یا TTL پذیرش provider منتظر نمی‌ماند؛ برای خدمت با مبلغ مثبت، ایجاد رزرو تنها با موجودی قابل‌استفاده کافی ممکن است و مبلغ خدمت را قفل می‌کند. خدمت رایگان بدون قفل ثبت می‌شود. گذارهای فعال `confirmed → in_progress | cancelled` و `in_progress → completed` هستند. مشتری رزرو را فقط پیش از مهلت قابل‌تنظیم `BOOKING_CANCELLATION_CUTOFF` لغو می‌کند؛ لغو هم‌زمان قفل را آزاد می‌کند. ارائه‌دهنده مالک پس از آغاز، با `POST /api/v1/provider/bookings/{id}/complete` تکمیل را ثبت می‌کند و تسویه هم‌زمان انجام می‌شود.
+رزرو موفق بلافاصله با وضعیت `confirmed` ثبت می‌شود و برای تأیید دستی یا TTL پذیرش provider منتظر نمی‌ماند؛ برای خدمت با مبلغ مثبت، ایجاد رزرو تنها با موجودی قابل‌استفاده کافی ممکن است و مبلغ خدمت را قفل می‌کند. خدمت رایگان بدون قفل ثبت می‌شود. گذارهای فعال طبق ADR 0013 عبارت‌اند از: `confirmed → cancelled` با لغو مشتری پیش از مهلت `BOOKING_CANCELLATION_CUTOFF`، `confirmed → cancelled` با لغو ارائه‌دهنده مالک پیش از آغاز، `confirmed → in_progress` با آغاز خدمت، `in_progress → completion_pending` با درخواست تکمیل، `completion_pending → completed` با تأیید مشتری یا `disputed` با ثبت اختلاف، و `disputed → completed | cancelled` با حل اختلاف مدیر. قفل وجه فقط هنگام لغو آزاد و هنگام تأیید تکمیل/حل اختلاف/انقضای پنجره به درآمد داخلی ارائه‌دهنده و کمیسیون تسویه می‌شود.
 
 `GET /api/v1/wallet` مانده قابل‌استفاده، قفل‌شده و درآمد داخلی ارائه‌دهنده را برمی‌گرداند؛ `GET /api/v1/wallet/transactions` تاریخچه صفحه‌بندی‌شده اسناد دفترکل است. مشتری احرازشده با `POST /api/v1/payments/zarinpal`، مبلغ `amount_irr` و `Idempotency-Key`، پرداخت جدید ایجاد می‌کند؛ پاسخ شامل `redirect_url` و شناسه محلی پرداخت است. وضعیت متعلق به مشتری با `GET /api/v1/payments/{paymentID}` خوانده می‌شود. callback عمومی `GET /api/v1/payments/zarinpal/callback` فقط آغازگر بررسی server-to-server است و پارامتر مرورگر مدرک پرداخت نیست. تنها نتیجه تأییدشده با authority و مبلغ مطابق، کیف پول را در همان تراکنش وضعیت `succeeded` شارژ می‌کند. تکرار callback سند ledger دوم نمی‌سازد.
 
@@ -201,6 +202,16 @@ callback بازگشت مرورگر به `PAYMENT_CALLBACK_URL` در قراردا
 go run ./cmd/api migrate-down
 ```
 
+## سخت‌سازی و راستی‌آزمایی (مرحله 09)
+
+مرحله 09 رفتار موجود را بازنویسی نمی‌کند؛ صحت آن را روی PostgreSQL واقعی و مسیر HTTP می‌سنجد و شکاف‌های امنیتی/هم‌زمانی را می‌بندد:
+
+- **چرخش اتمی توکن Refresh:** تایید مجدد توکن را در یک تراکنش قفل، مصرف، لغو و جایگزین می‌کند. توکن دسترسی تازه ایمیل و نقش‌های جاری کاربر را حفظ می‌کند (پیش‌تر نقش‌ها در چرخش از دست می‌رفت). استفاده مجدد از توکن چرخیده‌شده به‌عنوان replay شناسایی و همه نشست‌های کاربر لغو می‌شود.
+- **محدودیت نرخ ایجاد پرداخت:** مسیر `POST /api/v1/payments/zarinpal` با همان سقف `AUTH_RATE_LIMIT_PER_MIN` و کد خطای `rate_limited` (پاسخ `429`) محافظت می‌شود.
+- **محدودسازی اندازه بدنه:** همه مسیرها با `HTTP_BODY_LIMIT` (پیش‌فرض ۱ مگابایت) در Fiber محدود می‌شوند.
+- **تضمین هم‌زمانی مالی:** تأیید تکمیل هم‌زمان فقط یک بار تسویه می‌کند و بازپرداخت هم‌زمان فقط یک بار معکوس می‌شود؛ اثر دفترکل و تغییر وضعیت در یک تراکنش‌اند و قید exclusion پایگاه داده هم‌پوشانی رزرو را در رقابت رد می‌کند.
+- **مسیر HTTP سرتاسری:** آزمون `internal/e2e` چرخه واقعی مشتری/ارائه‌دهنده/مدیر را از ثبت‌نام و راه‌اندازی نمایه تا رزرو، شارژ، تسویه، اختلاف، تسویه ارائه‌دهنده و بازپرداخت idempotent روی Fiber واقعی و PostgreSQL اجرا می‌کند.
+
 ## امنیت (مرحله‌های 02 و 03)
 
 - رمز عبور‌ها با Argon2id هش شده و متنخام رمز عبور در پایگاه داده ذخیره نمی‌شود.
@@ -224,9 +235,13 @@ go test ./...
 ```bash
 go test ./... -run 'Test(ServiceIntegration|Stage03APIIntegration|MigrationsIntegration)' -v
 go test ./internal/booking -run 'TestConcurrentOverlappingBookingRequests|TestDatabaseExclusionConstraintRejectsOverlap|TestInstantBookingMigrationCancelsExistingPendingRows' -count=1 -v
+go test ./internal/booking -run 'TestConcurrentConfirmCompletionSettlesOnce|TestConcurrentRefundReversesOnce' -count=1 -v
+go test ./internal/e2e -run TestFullBusinessWorkflow -count=1 -v
 ```
 
-آزمون هم‌زمانی هر بار ده درخواست overlapping را روی PostgreSQL واقعی اجرا می‌کند و در خود آزمون سه بار تکرار می‌شود.
+آزمون هم‌زمانی هر بار ده درخواست overlapping را روی PostgreSQL واقعی اجرا می‌کند و در خود آزمون سه بار تکرار می‌شود. آزمون‌های هم‌زمانی مالی مرحله 09 ضمناً ثابت می‌کنند تسویه و معکوس‌سازی هر کدام دقیقاً یک سند ledger می‌سازند و دفترکل پس از رقابت تراز می‌ماند.
+
+اجرای `go test -race` روی میزبان Windows این مخزن انجام نشده است، چون detector رقابت به cgo و یک کامپایلر C (مثل `gcc`) نیاز دارد که در این محیط نصب نیست؛ این مورد به‌عنوان مورد اجرانشده ثبت می‌شود و نه موفق. برای اجرای آن باید تصویر Docker حاوی Go و کامپایلر C استفاده شود.
 
 ## ساخت تصویر Docker
 

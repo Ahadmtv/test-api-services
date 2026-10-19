@@ -63,6 +63,7 @@ type HTTPConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+	BodyLimit    int
 }
 
 type DBConfig struct {
@@ -91,6 +92,7 @@ const (
 	defaultReadTimeout            = 10 * time.Second
 	defaultWriteTimeout           = 10 * time.Second
 	defaultIdleTimeout            = 30 * time.Second
+	defaultHTTPBodyLimit          = 1 << 20
 	defaultDBHost                 = "localhost"
 	defaultDBPort                 = 5432
 	defaultDBSSLMode              = "disable"
@@ -125,6 +127,7 @@ func LoadConfig() (*Config, error) {
 			ReadTimeout:  parseDuration(os.Getenv("HTTP_READ_TIMEOUT"), defaultReadTimeout, "HTTP_READ_TIMEOUT"),
 			WriteTimeout: parseDuration(os.Getenv("HTTP_WRITE_TIMEOUT"), defaultWriteTimeout, "HTTP_WRITE_TIMEOUT"),
 			IdleTimeout:  parseDuration(os.Getenv("HTTP_IDLE_TIMEOUT"), defaultIdleTimeout, "HTTP_IDLE_TIMEOUT"),
+			BodyLimit:    parsePositiveInt(os.Getenv("HTTP_BODY_LIMIT"), defaultHTTPBodyLimit),
 		},
 		DB: DBConfig{
 			Host:            firstNonEmpty(os.Getenv("DB_HOST"), defaultDBHost),
@@ -292,6 +295,19 @@ func parseInt(value string, fallback int, name string) int {
 	}
 	n, err := strconv.Atoi(value)
 	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// parsePositiveInt reads a strictly positive integer, falling back when the
+// value is absent or non-positive.
+func parsePositiveInt(value string, fallback int) int {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
 		return fallback
 	}
 	return n

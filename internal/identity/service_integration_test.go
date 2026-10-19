@@ -102,14 +102,25 @@ func TestServiceIntegration(t *testing.T) {
 	if refreshPair.RefreshToken == loginPair.RefreshToken {
 		t.Error("refresh token should rotate")
 	}
-
-	// Old refresh token revoked
-	_, err = service.Refresh(ctx, loginPair.RefreshToken)
-	if err != ErrInvalidCredentials {
-		t.Errorf("reused refresh token: got %v, want ErrInvalidCredentials", err)
+	rotatedClaims, err := ParseAccessToken(refreshPair.AccessToken, "01234567890123456789012345678901")
+	if err != nil {
+		t.Fatalf("parse rotated access token: %v", err)
+	}
+	if rotatedClaims.Email != email || len(rotatedClaims.Roles) == 0 {
+		t.Errorf("rotated access token lost identity: email=%q roles=%v", rotatedClaims.Email, rotatedClaims.Roles)
 	}
 
-	// Logout
+	// Replaying the rotated token is detected and revokes the whole family.
+	_, err = service.Refresh(ctx, loginPair.RefreshToken)
+	if err != ErrTokenReplayDetected {
+		t.Errorf("reused refresh token: got %v, want ErrTokenReplayDetected", err)
+	}
+	_, err = service.Refresh(ctx, refreshPair.RefreshToken)
+	if err != ErrInvalidCredentials {
+		t.Errorf("family after replay: got %v, want ErrInvalidCredentials", err)
+	}
+
+	// Logout is idempotent for an already-revoked token.
 	if err := service.Logout(ctx, refreshPair.RefreshToken); err != nil {
 		t.Fatalf("logout: %v", err)
 	}

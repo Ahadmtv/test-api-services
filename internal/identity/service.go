@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Service performs authentication operations.
@@ -92,11 +94,18 @@ func (s *Service) Register(ctx context.Context, email, phone, password string) (
 		}
 		return nil, fmt.Errorf("assign default role: %w", err)
 	}
+	pair, err := s.issueTokenPairTx(ctx, tx, userID, email, []string{"client"})
+	if err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit registration: %w", err)
 	}
 
-	return s.issueTokenPair(ctx, userID, email, []string{"client"})
+	return pair, nil
 }
 
 // Login verifies credentials and issues a token pair. It returns the same
@@ -126,40 +135,63 @@ func (s *Service) Login(ctx context.Context, email, password string) (*TokenPair
 	if roles == nil {
 		roles = []string{}
 	}
-	return s.issueTokenPair(ctx, record.ID, record.Email, roles)
+
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	pair, err := s.issueTokenPairTx(ctx, tx, record.ID, record.Email, roles)
+	if err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit login: %w", err)
+	}
+	return pair, nil
 }
 
-// Refresh rotates a refresh token. The presented plaintext token is hashed and
-// looked up. If found, active, and not revoked, it is revoked and a new
-// access+refresh pair is issued (rotation). If the token was already revoked
-// and has a replacement still active, a replay attack is suspected and every
-// token for the user is revoked.
+// Refresh rotates a refresh token atomically. The presented plaintext token is
+// hashed, locked, and revoked while a replacement token is inserted and linked
+// in the same transaction. If the token was already rotated (a replay), every
+// active token for the user is revoked and ErrTokenReplayDetected is returned.
+// The new access token carries the user's current email and roles so downstream
+// role checks keep working after rotation.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
 	refreshHash := hashToken(refreshToken)
+	now := time.Now().UTC()
 
-	row, err := s.store.FindRefreshToken(ctx, refreshHash)
+	refreshPlain, replacementHash, err := GenerateRefreshToken()
 	if err != nil {
-		// Unknown or revoked token: respond identically to avoid leaking state.
+		return nil, fmt.Errorf("generate refresh token: %w", err)
+	}
+	expiresAt := now.Add(s.refreshTokenTTL)
+
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+	}()
+
+	row, err := s.store.FindRefreshTokenForUpdate(ctx, tx, refreshHash)
+	if err != nil {
 		if errors.Is(err, ErrRefreshTokenNotFound) {
 			return nil, ErrInvalidCredentials
 		}
 		return nil, fmt.Errorf("find refresh token: %w", err)
 	}
 
-	now := time.Now().UTC()
-
 	if row.RevokedAt.Valid {
-		// Token already revoked. Replay detection: if it was replaced by a
-		// token that is still active, revoke all user tokens.
+		// Token already revoked. Replay detection: if it was replaced by
+		// another token, treat reuse as an attack and revoke the whole family.
 		if row.ReplacedBy.Valid && row.ReplacedBy.String != "" {
-			tx, err := s.store.BeginTx(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("begin transaction: %w", err)
-			}
 			if err := s.store.RevokeAllUserTokens(ctx, tx, row.UserID); err != nil {
-				if rbErr := tx.Rollback(ctx); rbErr != nil {
-					s.logger.Error("rollback failed", "error", rbErr)
-				}
 				return nil, fmt.Errorf("revoke user tokens: %w", err)
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -174,21 +206,36 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 		return nil, ErrInvalidCredentials
 	}
 
-	tx, err := s.store.BeginTx(ctx)
+	affected, err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, replacementHash)
 	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
-	}
-	if err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, ""); err != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil {
-			s.logger.Error("rollback failed", "error", rbErr)
-		}
 		return nil, fmt.Errorf("revoke refresh token: %w", err)
 	}
+	if affected != 1 {
+		// A concurrent request rotated this token first; reject the loser.
+		return nil, ErrInvalidCredentials
+	}
+	if err := s.store.InsertRefreshToken(ctx, tx, row.UserID, replacementHash, expiresAt); err != nil {
+		return nil, fmt.Errorf("store refresh token: %w", err)
+	}
+
+	record, err := s.store.GetUserByID(ctx, row.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("load user for refresh: %w", err)
+	}
+
+	accessToken, _, err := IssueAccessToken(record.ID, record.Email, record.Roles, AccessTokenConfig{
+		Secret: s.accessTokenSecret,
+		TTL:    s.accessTokenTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("issue access token: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit rotation: %w", err)
 	}
 
-	return s.issueTokenPair(ctx, row.UserID, "", nil)
+	return &TokenPair{AccessToken: accessToken, RefreshToken: refreshPlain}, nil
 }
 
 // Logout revokes the presented refresh token.
@@ -198,7 +245,7 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	if err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, ""); err != nil {
+	if _, err := s.store.RevokeRefreshToken(ctx, tx, refreshHash, ""); err != nil {
 		if rbErr := tx.Rollback(ctx); rbErr != nil {
 			s.logger.Error("rollback failed", "error", rbErr)
 		}
@@ -222,7 +269,10 @@ func (s *Service) Me(ctx context.Context, userID int64) (*User, error) {
 	}, nil
 }
 
-func (s *Service) issueTokenPair(ctx context.Context, userID int64, email string, roles []string) (*TokenPair, error) {
+// issueTokenPairTx mints an access token and persists a new refresh token
+// using the caller-provided transaction. The caller owns commit/rollback so
+// token issuance stays atomic with the surrounding state change.
+func (s *Service) issueTokenPairTx(ctx context.Context, tx pgx.Tx, userID int64, email string, roles []string) (*TokenPair, error) {
 	accessToken, _, err := IssueAccessToken(userID, email, roles, AccessTokenConfig{
 		Secret: s.accessTokenSecret,
 		TTL:    s.accessTokenTTL,
@@ -237,18 +287,8 @@ func (s *Service) issueTokenPair(ctx context.Context, userID int64, email string
 	}
 
 	expiresAt := time.Now().UTC().Add(s.refreshTokenTTL)
-	tx, err := s.store.BeginTx(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
-	}
 	if err := s.store.InsertRefreshToken(ctx, tx, userID, refreshHash, expiresAt); err != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil {
-			s.logger.Error("rollback failed", "error", rbErr)
-		}
 		return nil, fmt.Errorf("store refresh token: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit refresh token: %w", err)
 	}
 
 	return &TokenPair{

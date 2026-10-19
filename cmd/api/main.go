@@ -130,7 +130,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("payment gateway configuration: %w", err)
 	}
-	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL), rateLimiter).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
 	bookingHandler := booking.NewHandler(bookingService, bookingConfigFrom(cfg))
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
@@ -142,9 +142,7 @@ func run(ctx context.Context, args []string) error {
 	authGroup.Post("/refresh", handler.Refresh)
 	authGroup.Post("/logout", handler.Logout)
 
-	meGroup := app.Fiber().Group("/api/v1")
-	meGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
-	meGroup.Get("/me", handler.Me)
+	app.Fiber().Get("/api/v1/me", auth.Authenticator(cfg.Auth.AccessTokenSecret), handler.Me)
 
 	// Admin-only diagnostic route.
 	adminGroup := app.Fiber().Group("/api/v1/admin")

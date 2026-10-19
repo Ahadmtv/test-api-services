@@ -12,16 +12,32 @@ import (
 	"test-api/internal/platform"
 )
 
-type Handler struct{ service *Service }
+type Handler struct {
+	service     *Service
+	rateLimiter *auth.RateLimiter
+}
 
-func NewHandler(service *Service) *Handler { return &Handler{service: service} }
+func NewHandler(service *Service, rateLimiter *auth.RateLimiter) *Handler {
+	return &Handler{service: service, rateLimiter: rateLimiter}
+}
 
 func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	app.Get("/api/v1/payments/zarinpal/callback", h.Callback)
 	group := app.Group("/api/v1/payments")
 	group.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("client"))
-	group.Post("/zarinpal", h.Create)
+	group.Post("/zarinpal", h.rateLimited(h.Create))
 	group.Get("/:paymentID", h.Get)
+}
+
+// rateLimited applies a per-IP token bucket to externally-visible payment
+// creation so a single client cannot flood the gateway.
+func (h *Handler) rateLimited(next fiber.Handler) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if h.rateLimiter != nil && !h.rateLimiter.Allow(c.IP(), "payments:create") {
+			return platform.NewAppError("rate_limited", "تعداد درخواست‌ها بیش از حد مجاز است", 429, nil)
+		}
+		return next(c)
+	}
 }
 
 func (h *Handler) Create(c fiber.Ctx) error {
