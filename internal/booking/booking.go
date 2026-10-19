@@ -20,25 +20,41 @@ import (
 )
 
 type Booking struct {
-	ID              int64     `json:"id"`
-	ClientID        int64     `json:"client_id"`
-	ProviderID      int64     `json:"provider_id"`
-	ServiceID       int64     `json:"service_id"`
-	ServiceName     string    `json:"service_name"`
-	StartsAt        time.Time `json:"starts_at"`
-	EndsAt          time.Time `json:"ends_at"`
-	DurationMinutes int       `json:"duration_minutes"`
-	PriceIRR        int64     `json:"price_irr"`
-	BufferMinutes   int       `json:"buffer_minutes"`
-	Status          string    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID int64 `json:"id"`
+	// ClientID owns the booking; ProviderID is the provider user id.
+	ClientID              int64      `json:"client_id"`
+	ProviderID            int64      `json:"provider_id"`
+	ServiceID             int64      `json:"service_id"`
+	ServiceName           string     `json:"service_name"`
+	StartsAt              time.Time  `json:"starts_at"`
+	EndsAt                time.Time  `json:"ends_at"`
+	DurationMinutes       int        `json:"duration_minutes"`
+	PriceIRR              int64      `json:"price_irr"`
+	BufferMinutes         int        `json:"buffer_minutes"`
+	Status                string     `json:"status"`
+	CompletionRequestedAt *time.Time `json:"completion_requested_at"`
+	CompletedAt           *time.Time `json:"completed_at"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type Config struct {
 	CancellationCutoff time.Duration
-	Availability       scheduling.AvailabilityPolicy
+	// CompletionDisputeWindow is the time a client has to dispute a completion
+	// request before the booking settles automatically.
+	CompletionDisputeWindow time.Duration
+	Availability            scheduling.AvailabilityPolicy
 }
+
+// DisputeResolution is the administrator decision for an open dispute.
+type DisputeResolution string
+
+const (
+	// DisputeResolutionSettle pays the provider with the snapshotted commission.
+	DisputeResolutionSettle DisputeResolution = "settle"
+	// DisputeResolutionCancel releases the full hold back to the client.
+	DisputeResolutionCancel DisputeResolution = "cancel"
+)
 
 type CreateInput struct {
 	ServiceID      int64
@@ -57,18 +73,19 @@ type Service struct {
 	catalog   *catalog.Store
 	schedule  *scheduling.Store
 	wallet    *wallet.Service
+	config    Config
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func NewService(pool *pgxpool.Pool, providerProfiles *providers.Service, services *catalog.Store, schedule *scheduling.Store, walletServices ...*wallet.Service) *Service {
+func NewService(pool *pgxpool.Pool, providerProfiles *providers.Service, services *catalog.Store, schedule *scheduling.Store, config Config, walletServices ...*wallet.Service) *Service {
 	walletService := wallet.NewService(pool)
 	if len(walletServices) > 0 && walletServices[0] != nil {
 		walletService = walletServices[0]
 	}
-	return &Service{Store: NewStore(pool), providers: providerProfiles, catalog: services, schedule: schedule, wallet: walletService}
+	return &Service{Store: NewStore(pool), providers: providerProfiles, catalog: services, schedule: schedule, wallet: walletService, config: config}
 }
 
 var (
@@ -79,6 +96,9 @@ var (
 	ErrForbidden           = errors.New("booking operation forbidden")
 	ErrInvalidTransition   = errors.New("invalid booking transition")
 	ErrCancellationClosed  = errors.New("booking cancellation window closed")
+	ErrDisputeWindowClosed = errors.New("booking dispute window closed")
+	ErrInvalidResolution   = errors.New("invalid dispute resolution")
+	ErrDisputeNotFound     = errors.New("booking dispute not found")
 	ErrIdempotencyConflict = errors.New("idempotency key payload conflict")
 )
 
@@ -215,7 +235,7 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'confirmed', $10)
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
 	`, clientID, providerID, service.ID, service.Name, startAt, endAt,
 		service.DurationMinutes, service.PriceIRR, service.BufferMinutes, paymentMethod))
 	if err != nil {
@@ -253,7 +273,7 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 func (s *Store) Get(ctx context.Context, actorID, bookingID int64) (*Booking, error) {
 	item, err := scanBooking(s.pool.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 AND (client_id = $2 OR provider_id = $2)
 	`, bookingID, actorID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -275,7 +295,7 @@ func (s *Store) ListProvider(ctx context.Context, providerID, after int64, limit
 
 func (s *Store) list(ctx context.Context, predicate string, actorID, after int64, limit int) ([]Booking, bool, error) {
 	query := `SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-		duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
+		duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE ` + predicate + ` AND id > $2 ORDER BY id LIMIT $3`
 	rows, err := s.pool.Query(ctx, query, actorID, after, limit+1)
 	if err != nil {
@@ -336,6 +356,159 @@ func (s *Service) Cancel(ctx context.Context, clientID, bookingID int64, cutoff 
 	}, func(tx pgx.Tx) error { return s.wallet.ReleaseBookingHoldTx(ctx, tx, bookingID, clientID, requestID) })
 }
 
+// CancelByProvider lets the owning provider cancel a confirmed booking before
+// the scheduled service start; the hold is released to the client in the same
+// transaction. Provider cancellation after start follows the dispute path.
+func (s *Service) CancelByProvider(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
+	return s.transition(ctx, providerID, bookingID, "cancelled", "provider_cancelled", requestID, func(current Booking) error {
+		if current.ProviderID != providerID {
+			return ErrBookingNotFound
+		}
+		if current.Status == "cancelled" {
+			return nil
+		}
+		if current.Status != "confirmed" {
+			return ErrInvalidTransition
+		}
+		if time.Now().UTC().After(current.StartsAt) {
+			return ErrCancellationClosed
+		}
+		return nil
+	}, func(tx pgx.Tx) error { return s.wallet.ReleaseBookingHoldTx(ctx, tx, bookingID, providerID, requestID) })
+}
+
+// Dispute lets the client open a dispute against a completion request inside
+// the configured dispute window; booking funds stay on hold.
+func (s *Service) Dispute(ctx context.Context, clientID, bookingID int64, reason, requestID string) (*Booking, error) {
+	return s.transition(ctx, clientID, bookingID, "disputed", "client_disputed", requestID, func(current Booking) error {
+		if current.ClientID != clientID {
+			return ErrBookingNotFound
+		}
+		if current.Status == "disputed" {
+			return nil
+		}
+		if current.Status != "completion_pending" {
+			return ErrInvalidTransition
+		}
+		if current.CompletionRequestedAt == nil {
+			return ErrInvalidTransition
+		}
+		if s.config.CompletionDisputeWindow > 0 &&
+			time.Now().UTC().After(current.CompletionRequestedAt.UTC().Add(s.config.CompletionDisputeWindow)) {
+			return ErrDisputeWindowClosed
+		}
+		return nil
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO booking_disputes (booking_id, opened_by, reason)
+			VALUES ($1, $2, $3)
+		`, bookingID, clientID, reason); err != nil {
+			return fmt.Errorf("record booking dispute: %w", err)
+		}
+		return nil
+	})
+}
+
+// ResolveDispute lets an administrator settle a disputed booking in favor of
+// the provider (settle) or the client (cancel). The financial effect and the
+// status change happen atomically and the dispute row is closed with the
+// decision.
+func (s *Service) ResolveDispute(ctx context.Context, adminID, bookingID int64, resolution DisputeResolution, note, requestID string) (*Booking, error) {
+	if resolution != DisputeResolutionSettle && resolution != DisputeResolutionCancel {
+		return nil, ErrInvalidResolution
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin dispute resolution: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var isAdmin bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_roles WHERE user_id = $1 AND role = 'admin')`, adminID).Scan(&isAdmin); err != nil {
+		return nil, fmt.Errorf("check dispute administrator role: %w", err)
+	}
+	if !isAdmin {
+		return nil, ErrForbidden
+	}
+	target := "cancelled"
+	if resolution == DisputeResolutionSettle {
+		target = "completed"
+	}
+	var providerID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM bookings WHERE id = $1`, bookingID).Scan(&providerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBookingNotFound
+		}
+		return nil, fmt.Errorf("read dispute booking provider: %w", err)
+	}
+	if _, err := s.providers.LockForBookingTx(ctx, tx, providerID); err != nil {
+		return nil, err
+	}
+	current, err := scanBooking(tx.QueryRow(ctx, `
+		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+		FROM bookings WHERE id = $1 FOR UPDATE
+	`, bookingID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrBookingNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock booking for dispute resolution: %w", err)
+	}
+	if current.Status == target {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit idempotent dispute read: %w", err)
+		}
+		return current, nil
+	}
+	if current.Status != "disputed" {
+		return nil, ErrInvalidTransition
+	}
+	disputeID, err := openDisputeIDTx(ctx, tx, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	switch resolution {
+	case DisputeResolutionSettle:
+		if err := s.wallet.SettleBookingHoldTx(ctx, tx, bookingID, adminID, requestID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE bookings SET completed_at = COALESCE(completed_at, now()) WHERE id = $1`, bookingID); err != nil {
+			return nil, fmt.Errorf("stamp dispute completion: %w", err)
+		}
+	case DisputeResolutionCancel:
+		if err := s.wallet.ReleaseBookingHoldTx(ctx, tx, bookingID, adminID, requestID); err != nil {
+			return nil, err
+		}
+	}
+	if err := closeDisputeTx(ctx, tx, disputeID, adminID, string(resolution), note); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT set_config('app.actor_type', 'user', true),
+		       set_config('app.actor_user_id', $1, true),
+		       set_config('app.request_id', $2, true),
+		       set_config('app.transition_reason', $3, true)
+	`, fmt.Sprint(adminID), requestID, "dispute_resolved_"+string(resolution)); err != nil {
+		return nil, fmt.Errorf("set dispute audit context: %w", err)
+	}
+	item, err := scanBooking(tx.QueryRow(ctx, `
+		UPDATE bookings SET status = $1, updated_at = now()
+		WHERE id = $2 AND status = 'disputed'
+		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+	`, target, bookingID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrInvalidTransition
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update booking after dispute resolution: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit dispute resolution: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Service) Refund(ctx context.Context, adminID, bookingID int64, idempotencyKey, requestID string) error {
 	if adminID < 1 || bookingID < 1 {
 		return wallet.ErrInvalidInput
@@ -381,20 +554,60 @@ func (s *Service) Refund(ctx context.Context, adminID, bookingID int64, idempote
 	return nil
 }
 
-// Complete allows the owning provider to settle an in-progress wallet booking.
-func (s *Service) Complete(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
-	return s.transition(ctx, providerID, bookingID, "completed", "service_completed", requestID, func(current Booking) error {
+// RequestCompletion lets the owning provider mark a finished service as
+// completion_pending; settlement waits for client confirmation, dispute
+// resolution, or dispute-window expiry.
+func (s *Service) RequestCompletion(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
+	return s.transition(ctx, providerID, bookingID, "completion_pending", "service_complete_requested", requestID, func(current Booking) error {
 		if current.ProviderID != providerID {
 			return ErrBookingNotFound
 		}
-		if current.Status == "completed" {
+		if current.Status == "completion_pending" {
 			return nil
 		}
 		if current.Status != "in_progress" {
 			return ErrInvalidTransition
 		}
 		return nil
-	}, func(tx pgx.Tx) error { return s.wallet.SettleBookingHoldTx(ctx, tx, bookingID, providerID, requestID) })
+	}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE bookings SET completion_requested_at = now() WHERE id = $1`, bookingID); err != nil {
+			return fmt.Errorf("stamp completion request: %w", err)
+		}
+		return nil
+	})
+}
+
+// ConfirmCompletion lets the booking client settle the requested completion.
+// The hold is settled and the booking becomes completed in one transaction;
+// repeated confirmation requests replay the terminal state without a second
+// settlement.
+func (s *Service) ConfirmCompletion(ctx context.Context, clientID, bookingID int64, requestID string) (*Booking, error) {
+	return s.transition(ctx, clientID, bookingID, "completed", "client_confirmed_completion", requestID, func(current Booking) error {
+		if current.ClientID != clientID {
+			return ErrBookingNotFound
+		}
+		if current.Status == "completed" {
+			return nil
+		}
+		if current.Status != "completion_pending" {
+			return ErrInvalidTransition
+		}
+		return nil
+	}, s.finalizeCompletionEffect(ctx, bookingID, clientID, requestID))
+}
+
+// finalizeCompletionEffect settles the booking hold (no-op without a hold),
+// stamps completed_at, and leaves the status CAS to the caller's transition.
+func (s *Service) finalizeCompletionEffect(ctx context.Context, bookingID, actorID int64, requestID string) func(pgx.Tx) error {
+	return func(tx pgx.Tx) error {
+		if err := s.wallet.SettleBookingHoldTx(ctx, tx, bookingID, actorID, requestID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE bookings SET completed_at = COALESCE(completed_at, now()) WHERE id = $1`, bookingID); err != nil {
+			return fmt.Errorf("stamp booking completion: %w", err)
+		}
+		return nil
+	}
 }
 
 func (s *Service) transition(ctx context.Context, actorID, bookingID int64, target, reason, requestID string, validate func(Booking) error, effects ...func(pgx.Tx) error) (*Booking, error) {
@@ -420,7 +633,7 @@ func (s *Service) transition(ctx context.Context, actorID, bookingID int64, targ
 	}
 	current, err := scanBooking(tx.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 FOR UPDATE
 	`, bookingID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -453,7 +666,7 @@ func (s *Service) transition(ctx context.Context, actorID, bookingID int64, targ
 		UPDATE bookings SET status = $1, updated_at = now()
 		WHERE id = $2 AND status = $3
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
 	`, target, bookingID, current.Status))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInvalidTransition
@@ -471,7 +684,7 @@ func listOccupiedTx(ctx context.Context, tx pgx.Tx, providerID int64, startAt, e
 	rows, err := tx.Query(ctx, `
 		SELECT starts_at, ends_at + buffer_minutes * INTERVAL '1 minute'
 		FROM bookings
-		WHERE provider_id = $1 AND status IN ('confirmed', 'in_progress')
+		WHERE provider_id = $1 AND status IN ('confirmed', 'in_progress', 'completion_pending', 'disputed')
 		  AND starts_at < $3 AND ends_at + buffer_minutes * INTERVAL '1 minute' > $2
 		ORDER BY starts_at
 	`, providerID, startAt.UTC(), endAt.UTC())
@@ -496,7 +709,7 @@ func scanBooking(row pgx.Row) (*Booking, error) {
 	var item Booking
 	err := row.Scan(&item.ID, &item.ClientID, &item.ProviderID, &item.ServiceID, &item.ServiceName,
 		&item.StartsAt, &item.EndsAt, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes,
-		&item.Status, &item.CreatedAt, &item.UpdatedAt)
+		&item.Status, &item.CompletionRequestedAt, &item.CompletedAt, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -515,4 +728,147 @@ func requestFingerprint(serviceID int64, startsAt time.Time) string {
 func isOverlapViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23P01" && pgErr.ConstraintName == "bookings_no_overlapping_active_provider_slots"
+}
+
+// ExpireDisputeWindows finalizes completion_pending bookings whose dispute
+// window elapsed without an open dispute. Each booking is settled in its own
+// transaction with a conditional status update, so a booking can never settle
+// twice, and bookings locked by a concurrent operator are skipped.
+func (s *Service) ExpireDisputeWindows(ctx context.Context, window time.Duration, limit int) (int, error) {
+	if window <= 0 || limit < 1 {
+		return 0, ErrInvalidInput
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id FROM bookings
+		WHERE status = 'completion_pending'
+			AND completion_requested_at IS NOT NULL
+			AND completion_requested_at <= now() - $1::interval
+		ORDER BY id
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED
+	`, window, limit)
+	if err != nil {
+		return 0, fmt.Errorf("select expired dispute windows: %w", err)
+	}
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	settled := 0
+	for _, id := range ids {
+		ok, err := s.expireDisputeWindow(ctx, id, window)
+		if err != nil {
+			return settled, fmt.Errorf("expire dispute window booking %d: %w", id, err)
+		}
+		if ok {
+			settled++
+		}
+	}
+	return settled, nil
+}
+
+func (s *Service) expireDisputeWindow(ctx context.Context, bookingID int64, window time.Duration) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin dispute expiry: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var providerID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM bookings WHERE id = $1`, bookingID).Scan(&providerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read expiry booking provider: %w", err)
+	}
+	if _, err := s.providers.LockForBookingTx(ctx, tx, providerID); err != nil {
+		return false, err
+	}
+	current, err := scanBooking(tx.QueryRow(ctx, `
+		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
+			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+		FROM bookings WHERE id = $1 FOR UPDATE
+	`, bookingID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock booking for dispute expiry: %w", err)
+	}
+	if current.Status != "completion_pending" {
+		return false, nil
+	}
+	createdAt := current.CompletionRequestedAt
+	if createdAt == nil || time.Since(createdAt.UTC()) < window {
+		return false, nil
+	}
+	set_config, err := tx.Exec(ctx, `
+		SELECT set_config('app.actor_type', 'system', true),
+		       set_config('app.actor_user_id', '', true),
+		       set_config('app.request_id', $1, true),
+		       set_config('app.transition_reason', 'dispute_window_expired', true)
+	`, "dispute-window-expiry")
+	if err != nil {
+		return false, fmt.Errorf("set expiry audit context: %w", err)
+	}
+	_ = set_config
+	if _, err := tx.Exec(ctx, `
+		UPDATE bookings SET completed_at = COALESCE(completed_at, now())
+		WHERE id = $1
+	`, bookingID); err != nil {
+		return false, fmt.Errorf("stamp expiry completion: %w", err)
+	}
+	if err := s.wallet.SettleBookingHoldTx(ctx, tx, bookingID, 0, "dispute-window-expiry"); err != nil {
+		return false, err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE bookings SET status = 'completed', updated_at = now()
+		WHERE id = $1 AND status = 'completion_pending'
+	`, bookingID)
+	if err != nil {
+		return false, fmt.Errorf("complete expiry booking: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit dispute expiry: %w", err)
+	}
+	return true, nil
+}
+
+func openDisputeIDTx(ctx context.Context, tx pgx.Tx, bookingID int64) (int64, error) {
+	var disputeID int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM booking_disputes WHERE booking_id = $1`, bookingID).Scan(&disputeID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrDisputeNotFound
+		}
+		return 0, fmt.Errorf("read booking dispute: %w", err)
+	}
+	return disputeID, nil
+}
+
+func closeDisputeTx(ctx context.Context, tx pgx.Tx, disputeID, adminID int64, resolution, note string) error {
+	result, err := tx.Exec(ctx, `
+		UPDATE booking_disputes
+		SET resolved_at = now(), resolved_by = $1, resolution = $2, resolution_note = $3
+		WHERE id = $4 AND resolved_at IS NULL
+	`, adminID, resolution, note, disputeID)
+	if err != nil {
+		return fmt.Errorf("close booking dispute: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidTransition
+	}
+	return nil
 }

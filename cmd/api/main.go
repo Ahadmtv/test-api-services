@@ -18,6 +18,7 @@ import (
 	"test-api/internal/catalog"
 	"test-api/internal/identity"
 	"test-api/internal/payments"
+	"test-api/internal/payouts"
 	"test-api/internal/platform"
 	"test-api/internal/providerapi"
 	"test-api/internal/providers"
@@ -73,6 +74,25 @@ func run(ctx context.Context, args []string) error {
 			)
 			return nil
 		}
+		if args[0] == "bookings-settle-expired" {
+			bookingSvc := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg))
+			settled, err := bookingSvc.ExpireDisputeWindows(ctx, cfg.Booking.CompletionDisputeWindow, 100)
+			if err != nil {
+				return fmt.Errorf("settle expired dispute windows: %w", err)
+			}
+			logger.Info("dispute window settlement completed", "settled", settled)
+			return nil
+		}
+		if args[0] == "payouts-reconcile" {
+			if err := payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR).Verify(ctx); err != nil {
+				return fmt.Errorf("payout reconciliation: %w", err)
+			}
+			if err := wallet.NewService(db.Pool()).Reconcile(ctx); err != nil {
+				return fmt.Errorf("wallet reconciliation: %w", err)
+			}
+			logger.Info("payout reconciliation completed")
+			return nil
+		}
 		return runMigration(ctx, args[0], db, logger)
 	}
 
@@ -104,10 +124,6 @@ func run(ctx context.Context, args []string) error {
 		policy,
 	)
 	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
-	bookingConfig := booking.Config{
-		CancellationCutoff: cfg.Booking.CancellationCutoff,
-		Availability:       policy,
-	}
 	walletService := wallet.NewService(db.Pool())
 	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	paymentGateway, err := payments.NewZarinpalGateway(cfg.Payments.MerchantID, payments.ZarinpalEnvironment(cfg.Payments.Environment))
@@ -115,8 +131,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("payment gateway configuration: %w", err)
 	}
 	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
-	bookingHandler := booking.NewHandler(booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), walletService), bookingConfig)
+	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
+	bookingHandler := booking.NewHandler(bookingService, bookingConfigFrom(cfg))
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	payouts.NewHandler(payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 
 	authGroup := app.Fiber().Group("/api/v1/auth")
 	authGroup.Post("/register", handler.Register)
@@ -197,7 +215,19 @@ func runMigration(ctx context.Context, command string, db *platform.DB, logger *
 			fmt.Printf("%-7d %-10s %s\n", s.Version, s.Name, state)
 		}
 	default:
-		return fmt.Errorf("unknown command %q (expected migrate, migrate-down, migrate-status or wallet-reconcile)", command)
+		return fmt.Errorf("unknown command %q (expected migrate, migrate-down, migrate-status, wallet-reconcile)", command)
 	}
 	return nil
+}
+
+func bookingConfigFrom(cfg *platform.Config) booking.Config {
+	return booking.Config{
+		CancellationCutoff:      cfg.Booking.CancellationCutoff,
+		CompletionDisputeWindow: cfg.Booking.CompletionDisputeWindow,
+		Availability: scheduling.AvailabilityPolicy{
+			SlotIncrement:  cfg.Availability.SlotIncrement,
+			MinimumNotice:  cfg.Availability.MinimumNotice,
+			MaximumHorizon: cfg.Availability.MaximumHorizon,
+		},
+	}
 }

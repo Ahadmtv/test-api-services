@@ -40,16 +40,32 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	provider.Use(auth.RequireRoles("provider"))
 	provider.Get("/", h.ProviderBookings)
 	provider.Post("/:bookingID/start", h.Start)
-	provider.Post("/:bookingID/complete", h.Complete)
+	provider.Post("/:bookingID/request-completion", h.RequestCompletion)
+	provider.Post("/:bookingID/cancel", h.CancelByProvider)
+
+	clientActions := app.Group("/api/v1/bookings")
+	clientActions.Use(auth.Authenticator(accessTokenSecret))
+	clientActions.Post("/:bookingID/confirm-completion", auth.RequireRoles("client"), h.ConfirmCompletion)
+	clientActions.Post("/:bookingID/dispute", auth.RequireRoles("client"), h.Dispute)
 
 	admin := app.Group("/api/v1/admin")
 	admin.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("admin"))
 	admin.Post("/bookings/:bookingID/refund", h.Refund)
+	admin.Post("/bookings/:bookingID/dispute-resolution", h.ResolveDispute)
 }
 
 type createRequest struct {
 	ServiceID int64  `json:"service_id"`
 	StartsAt  string `json:"starts_at"`
+}
+
+type disputeRequest struct {
+	Reason string `json:"reason"`
+}
+
+type resolveDisputeRequest struct {
+	Resolution string `json:"resolution"`
+	Note       string `json:"note"`
 }
 
 func (h *Handler) Create(c fiber.Ctx) error {
@@ -123,8 +139,81 @@ func (h *Handler) Start(c fiber.Ctx) error {
 	return h.providerTransition(c, h.service.Start)
 }
 
-func (h *Handler) Complete(c fiber.Ctx) error {
-	return h.providerTransition(c, h.service.Complete)
+func (h *Handler) RequestCompletion(c fiber.Ctx) error {
+	return h.providerTransition(c, h.service.RequestCompletion)
+}
+
+func (h *Handler) CancelByProvider(c fiber.Ctx) error {
+	return h.providerTransition(c, h.service.CancelByProvider)
+}
+
+func (h *Handler) ConfirmCompletion(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := h.service.ConfirmCompletion(c.Context(), principal(c).UserID, id, requestID)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
+}
+
+func (h *Handler) Dispute(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	var req disputeRequest
+	decoder := json.NewDecoder(bytes.NewReader(c.Body()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return invalidBookingRequest()
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return invalidBookingRequest()
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" || len(reason) > 1000 {
+		return platform.NewAppError("invalid_dispute_reason", "شرح اختلاف لازم است", 400, nil)
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := h.service.Dispute(c.Context(), principal(c).UserID, id, reason, requestID)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
+}
+
+func (h *Handler) ResolveDispute(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	var req resolveDisputeRequest
+	decoder := json.NewDecoder(bytes.NewReader(c.Body()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		return invalidBookingRequest()
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return invalidBookingRequest()
+	}
+	resolution := DisputeResolution(strings.TrimSpace(req.Resolution))
+	if resolution != DisputeResolutionSettle && resolution != DisputeResolutionCancel {
+		return invalidBookingRequest()
+	}
+	note := strings.TrimSpace(req.Note)
+	if len(note) > 1000 {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	item, err := h.service.ResolveDispute(c.Context(), principal(c).UserID, id, resolution, note, requestID)
+	if err != nil {
+		return bookingError(err)
+	}
+	return c.JSON(item)
 }
 
 func (h *Handler) Refund(c fiber.Ctx) error {
@@ -236,6 +325,10 @@ func bookingError(err error) error {
 		return platform.NewAppError("invalid_booking_transition", "این تغییر وضعیت رزرو مجاز نیست", 409, nil)
 	case errors.Is(err, ErrCancellationClosed):
 		return platform.NewAppError("cancellation_window_closed", "مهلت لغو رزرو پایان یافته است", 409, nil)
+	case errors.Is(err, ErrDisputeWindowClosed):
+		return platform.NewAppError("dispute_window_closed", "مهلت ثبت اختلاف پایان یافته است", 409, nil)
+	case errors.Is(err, ErrInvalidResolution), errors.Is(err, ErrDisputeNotFound):
+		return platform.NewAppError("dispute_not_resolvable", "اختلاف رزرو قابل حل نیست", 409, nil)
 	case errors.Is(err, wallet.ErrInsufficientFunds):
 		return platform.NewAppError("insufficient_wallet_funds", "موجودی قابل استفاده کیف پول کافی نیست", 409, nil)
 	case errors.Is(err, wallet.ErrInvalidInput), errors.Is(err, wallet.ErrInvalidAmount):

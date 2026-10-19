@@ -23,6 +23,7 @@ type Balance struct {
 	AvailableIRR        int64  `json:"available_irr"`
 	HeldIRR             int64  `json:"held_irr"`
 	ProviderEarningsIRR int64  `json:"provider_earnings_irr"`
+	PayoutReservedIRR   int64  `json:"payout_reserved_irr"`
 	Currency            string `json:"currency"`
 }
 
@@ -42,8 +43,9 @@ func (s *Service) Balance(ctx context.Context, userID int64) (*Balance, error) {
 	err := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(balance_irr) FILTER (WHERE kind = 'customer_available'), 0),
 		       COALESCE(MAX(balance_irr) FILTER (WHERE kind = 'customer_held'), 0),
-		       COALESCE(MAX(balance_irr) FILTER (WHERE kind = 'provider_earnings'), 0)
-		FROM wallet_accounts WHERE owner_user_id = $1`, userID).Scan(&b.AvailableIRR, &b.HeldIRR, &b.ProviderEarningsIRR)
+		       COALESCE(MAX(balance_irr) FILTER (WHERE kind = 'provider_earnings'), 0),
+		       COALESCE(MAX(balance_irr) FILTER (WHERE kind = 'provider_payout_reserved'), 0)
+		FROM wallet_accounts WHERE owner_user_id = $1`, userID).Scan(&b.AvailableIRR, &b.HeldIRR, &b.ProviderEarningsIRR, &b.PayoutReservedIRR)
 	if err != nil {
 		return nil, fmt.Errorf("read wallet balance: %w", err)
 	}

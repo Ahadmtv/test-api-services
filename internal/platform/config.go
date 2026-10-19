@@ -22,6 +22,7 @@ type Config struct {
 	Auth         AuthConfig
 	Availability AvailabilityConfig
 	Booking      BookingConfig
+	Payouts      PayoutConfig
 	Payments     PaymentConfig
 	Version      string
 }
@@ -34,6 +35,13 @@ type AvailabilityConfig struct {
 
 type BookingConfig struct {
 	CancellationCutoff time.Duration
+	// CompletionDisputeWindow is the window the client has to dispute a
+	// completion request before it settles automatically.
+	CompletionDisputeWindow time.Duration
+}
+
+type PayoutConfig struct {
+	MinAmountIRR int64
 }
 
 type PaymentConfig struct {
@@ -98,6 +106,8 @@ const (
 	defaultAvailabilitySlot       = 15 * time.Minute
 	defaultAvailabilityNotice     = 2 * time.Hour
 	defaultAvailabilityHorizon    = 90 * 24 * time.Hour
+	defaultDisputeWindow          = 72 * time.Hour
+	defaultPayoutMinAmountIRR     = int64(100_000)
 	minAuthAccessTokenSecretLen   = 32
 )
 
@@ -212,8 +222,29 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.Booking.CompletionDisputeWindow, err = parseAvailabilityDuration("BOOKING_COMPLETION_DISPUTE_WINDOW", defaultDisputeWindow, false)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Payouts.MinAmountIRR, err = parseIrrMinimum(os.Getenv("PAYOUT_MIN_AMOUNT_IRR"), defaultPayoutMinAmountIRR)
+	if err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// parseIrrMinimum reads an integer IRR threshold strictly greater than one.
+func parseIrrMinimum(value string, fallback int64) (int64, error) {
+	if strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 2 {
+		return 0, fmt.Errorf("PAYOUT_MIN_AMOUNT_IRR must be an integer greater than one")
+	}
+	return parsed, nil
 }
 
 // DSN builds a libpq-style connection string for pgx from configuration parts.

@@ -43,10 +43,13 @@ func TestWalletHoldSettlementRefundAndReconciliation(t *testing.T) {
 	if _, err := f.service.Start(ctx, f.providerID, created.ID, "start-request"); err != nil {
 		t.Fatalf("start service: %v", err)
 	}
-	if _, err := f.service.Complete(ctx, f.providerID, created.ID, "settle-request"); err != nil {
+	if _, err := f.service.RequestCompletion(ctx, f.providerID, created.ID, "settle-request"); err != nil {
+		t.Fatalf("request completion: %v", err)
+	}
+	if _, err := f.service.ConfirmCompletion(ctx, f.clientID, created.ID, "confirm-request"); err != nil {
 		t.Fatalf("settle service: %v", err)
 	}
-	if _, err := f.service.Complete(ctx, f.providerID, created.ID, "settle-retry"); err != nil {
+	if _, err := f.service.ConfirmCompletion(ctx, f.clientID, created.ID, "settle-retry"); err != nil {
 		t.Fatalf("repeat settlement: %v", err)
 	}
 	var providerBalance, commissionBalance int64

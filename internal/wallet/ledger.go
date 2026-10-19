@@ -237,7 +237,7 @@ func auditTx(ctx context.Context, tx pgx.Tx, actorID int64, action, targetType s
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_events (actor_user_id, action, target_type, target_id, request_id, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-	`, actorID, action, targetType, targetID, requestID, string(payload)); err != nil {
+	`, nullableID(actorID), action, targetType, targetID, requestID, string(payload)); err != nil {
 		return fmt.Errorf("write audit event: %w", err)
 	}
 	return nil

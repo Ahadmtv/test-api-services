@@ -116,7 +116,12 @@ func newBookingFixture(t *testing.T) *bookingFixture {
 			t.Fatalf("fund fixture wallet: %v", err)
 		}
 	}
-	f.service = NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), walletService)
+	f.service = NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), Config{
+		Availability: scheduling.AvailabilityPolicy{
+			SlotIncrement: 15 * time.Minute, MinimumNotice: 0, MaximumHorizon: 90 * 24 * time.Hour,
+		},
+		CompletionDisputeWindow: 24 * time.Hour,
+	}, walletService)
 	f.config = Config{
 		Availability: scheduling.AvailabilityPolicy{
 			SlotIncrement: 15 * time.Minute, MinimumNotice: 0, MaximumHorizon: 90 * 24 * time.Hour,
