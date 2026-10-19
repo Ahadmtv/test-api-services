@@ -354,10 +354,64 @@ paths:
           $ref: '#/components/responses/Problem'
         '409':
           $ref: '#/components/responses/Problem'
+  /api/v1/wallet:
+    get:
+      summary: دریافت مانده کیف پول
+      description: مانده قابل‌استفاده و مبلغ قفل‌شده کاربر احرازشده را فقط به ریال صحیح برمی‌گرداند. این API عملیات تغییر مانده ندارد.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: مانده فعلی
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletBalance' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /api/v1/wallet/transactions:
+    get:
+      summary: تاریخچه اسناد کیف پول
+      description: اسناد دفترکل مؤثر بر حساب‌های کاربر احرازشده را با صفحه‌بندی cursor-based برمی‌گرداند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: صفحه اسناد کیف پول
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletTransactionPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /api/v1/admin/bookings/{bookingID}/refund:
+    post:
+      summary: بازپرداخت رزرو تکمیل‌شده
+      description: فقط مدیر مجاز است یک‌بار مبلغ رزرو تکمیل‌شده را با سند معکوس تسویه و آزادسازی قفل به کیف پول مشتری بازگرداند؛ نتیجه به‌صورت اتمی ثبت و قابل تکرار است.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bookingID
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        '204': { description: بازپرداخت ثبت شد یا نتیجه قبلی بازپخش شد }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /api/v1/bookings:
     post:
       summary: ایجاد رزرو
-      description: مشتری فقط شناسه خدمت و زمان آغاز را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. رزرو در همان تراکنش با وضعیت confirmed ایجاد و تا لغو یا تغییر چرخه رزرو اشغال می‌ماند. تأیید رزرو به معنی دریافت وجه نیست.
+      description: مشتری فقط شناسه خدمت و زمان آغاز را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. رزرو در همان تراکنش با وضعیت confirmed و payment_method=wallet ایجاد و مبلغ صحیح ریال از مانده قابل‌استفاده به قفل کیف پول منتقل می‌شود.
       security:
         - bearerAuth: []
       parameters:
@@ -435,7 +489,7 @@ paths:
   /api/v1/bookings/{bookingID}/cancel:
     post:
       summary: لغو رزرو توسط مشتری
-      description: رزرو pending قابل لغو است؛ رزرو confirmed تا مهلت پیکربندی‌شده پیش از آغاز قابل لغو است.
+      description: رزرو confirmed تا مهلت پیکربندی‌شده پیش از آغاز قابل لغو است؛ قفل فعال کیف پول در همان تراکنش آزاد می‌شود.
       security:
         - bearerAuth: []
       parameters:
@@ -475,6 +529,24 @@ paths:
           $ref: '#/components/responses/Problem'
         '403':
           $ref: '#/components/responses/Problem'
+  /api/v1/provider/bookings/{bookingID}/complete:
+    post:
+      summary: تکمیل خدمت و تسویه
+      description: ارائه‌دهنده مالک، رزرو in_progress را به completed می‌برد و قفل کیف پول همان رزرو در همان تراکنش تسویه می‌شود.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingID'
+      responses:
+        '200':
+          description: رزرو تکمیل‌شده
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /api/v1/provider/bookings/{bookingID}/start:
     post:
       summary: آغاز خدمت
@@ -686,6 +758,29 @@ components:
         next_cursor:
           type: [integer, 'null']
           format: int64
+    WalletBalance:
+      type: object
+      required: [available_irr, held_irr, provider_earnings_irr, currency]
+      properties:
+        available_irr: { type: integer, format: int64, minimum: 0, description: مانده قابل‌استفاده صحیح ریال }
+        held_irr: { type: integer, format: int64, minimum: 0, description: مبلغ قفل‌شده صحیح ریال }
+        provider_earnings_irr: { type: integer, format: int64, minimum: 0, description: درآمد قابل‌تسویه داخلی ارائه‌دهنده؛ برداشت بانکی در این مرحله وجود ندارد }
+        currency: { type: string, const: IRR }
+    WalletTransaction:
+      type: object
+      required: [id, reference, kind, created_at, amount_irr]
+      properties:
+        id: { type: integer, format: int64 }
+        reference: { type: string }
+        kind: { type: string, enum: [funding, hold_place, hold_release, refund_release, hold_settle, reversal] }
+        created_at: { type: string, format: date-time }
+        amount_irr: { type: integer, format: int64, minimum: 1, description: بزرگ‌ترین مبلغ ثبت‌شده در حساب‌های متعلق به این کاربر برای سند موردنظر }
+    WalletTransactionPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WalletTransaction' } }
+        next_cursor: { type: [integer, 'null'], format: int64 }
     BookingCreateInput:
       type: object
       additionalProperties: false
@@ -705,7 +800,7 @@ components:
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time }
         duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
-        price_irr: { type: integer, format: int64, minimum: 0, description: snapshot مبلغ صحیح ریال؛ دریافت یا قفل وجه انجام نمی‌شود }
+        price_irr: { type: integer, format: int64, minimum: 0, description: snapshot مبلغ صحیح ریال؛ فقط مبلغ مثبت هنگام ایجاد رزرو در wallet قفل می‌شود }
         buffer_minutes: { type: integer, minimum: 0, maximum: 1440 }
         status:
           type: string

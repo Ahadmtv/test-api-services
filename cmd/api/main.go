@@ -21,6 +21,7 @@ import (
 	"test-api/internal/providerapi"
 	"test-api/internal/providers"
 	"test-api/internal/scheduling"
+	"test-api/internal/wallet"
 )
 
 func main() {
@@ -86,7 +87,9 @@ func run(ctx context.Context, args []string) error {
 		CancellationCutoff: cfg.Booking.CancellationCutoff,
 		Availability:       policy,
 	}
-	bookingHandler := booking.NewHandler(booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool())), bookingConfig)
+	walletService := wallet.NewService(db.Pool())
+	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	bookingHandler := booking.NewHandler(booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), walletService), bookingConfig)
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 
 	authGroup := app.Fiber().Group("/api/v1/auth")
@@ -148,6 +151,11 @@ func runMigration(ctx context.Context, command string, db *platform.DB, logger *
 		if err := migrator.Down(ctx); err != nil {
 			return fmt.Errorf("migrate down: %w", err)
 		}
+	case "wallet-reconcile":
+		if err := wallet.NewService(db.Pool()).Reconcile(ctx); err != nil {
+			return fmt.Errorf("wallet reconciliation: %w", err)
+		}
+		logger.Info("wallet reconciliation completed")
 	case "migrate-status":
 		statuses, err := migrator.Status(ctx)
 		if err != nil {
@@ -163,7 +171,7 @@ func runMigration(ctx context.Context, command string, db *platform.DB, logger *
 			fmt.Printf("%-7d %-10s %s\n", s.Version, s.Name, state)
 		}
 	default:
-		return fmt.Errorf("unknown command %q (expected migrate, migrate-down or migrate-status)", command)
+		return fmt.Errorf("unknown command %q (expected migrate, migrate-down, migrate-status or wallet-reconcile)", command)
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"test-api/internal/auth"
 	"test-api/internal/identity"
 	"test-api/internal/platform"
+	"test-api/internal/wallet"
 )
 
 type Handler struct {
@@ -39,6 +40,11 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	provider.Use(auth.RequireRoles("provider"))
 	provider.Get("/", h.ProviderBookings)
 	provider.Post("/:bookingID/start", h.Start)
+	provider.Post("/:bookingID/complete", h.Complete)
+
+	admin := app.Group("/api/v1/admin")
+	admin.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("admin"))
+	admin.Post("/bookings/:bookingID/refund", h.Refund)
 }
 
 type createRequest struct {
@@ -115,6 +121,26 @@ func (h *Handler) ProviderBookings(c fiber.Ctx) error {
 
 func (h *Handler) Start(c fiber.Ctx) error {
 	return h.providerTransition(c, h.service.Start)
+}
+
+func (h *Handler) Complete(c fiber.Ctx) error {
+	return h.providerTransition(c, h.service.Complete)
+}
+
+func (h *Handler) Refund(c fiber.Ctx) error {
+	id, err := bookingID(c.Params("bookingID"))
+	if err != nil {
+		return invalidBookingRequest()
+	}
+	key := strings.TrimSpace(c.Get("Idempotency-Key"))
+	if key == "" || len(key) > 128 {
+		return invalidBookingRequest()
+	}
+	requestID, _ := c.Locals(platform.RequestIDKey).(string)
+	if err := h.service.Refund(c.Context(), principal(c).UserID, id, key, requestID); err != nil {
+		return bookingError(err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 func (h *Handler) providerTransition(c fiber.Ctx, transition func(context.Context, int64, int64, string) (*Booking, error)) error {
@@ -200,6 +226,8 @@ func bookingError(err error) error {
 		return platform.NewAppError("service_unavailable", "خدمت برای رزرو در دسترس نیست", 404, nil)
 	case errors.Is(err, ErrBookingNotFound):
 		return platform.NewAppError("booking_not_found", "رزرو یافت نشد", 404, nil)
+	case errors.Is(err, ErrForbidden):
+		return platform.NewAppError("forbidden", "دسترسی به این عملیات مجاز نیست", 403, nil)
 	case errors.Is(err, ErrSlotUnavailable):
 		return platform.NewAppError("booking_conflict", "زمان درخواستی دیگر در دسترس نیست", 409, nil)
 	case errors.Is(err, ErrIdempotencyConflict):
@@ -208,6 +236,16 @@ func bookingError(err error) error {
 		return platform.NewAppError("invalid_booking_transition", "این تغییر وضعیت رزرو مجاز نیست", 409, nil)
 	case errors.Is(err, ErrCancellationClosed):
 		return platform.NewAppError("cancellation_window_closed", "مهلت لغو رزرو پایان یافته است", 409, nil)
+	case errors.Is(err, wallet.ErrInsufficientFunds):
+		return platform.NewAppError("insufficient_wallet_funds", "موجودی قابل استفاده کیف پول کافی نیست", 409, nil)
+	case errors.Is(err, wallet.ErrInvalidInput), errors.Is(err, wallet.ErrInvalidAmount):
+		return invalidBookingRequest()
+	case errors.Is(err, wallet.ErrIdempotencyConflict):
+		return platform.NewAppError("idempotency_conflict", "کلید تکرار برای درخواست متفاوت استفاده شده است", 409, nil)
+	case errors.Is(err, wallet.ErrNotReversible), errors.Is(err, wallet.ErrAlreadyReversed):
+		return platform.NewAppError("wallet_operation_conflict", "عملیات مالی برای این رزرو قابل بازگشت نیست", 409, nil)
+	case errors.Is(err, wallet.ErrTransactionNotFound):
+		return platform.NewAppError("wallet_hold_not_found", "قفل مالی رزرو یافت نشد", 404, nil)
 	default:
 		return platform.Unexpected(err)
 	}

@@ -25,6 +25,7 @@ import (
 	"test-api/internal/platform"
 	"test-api/internal/providers"
 	"test-api/internal/scheduling"
+	"test-api/internal/wallet"
 )
 
 const integrationSecret = "01234567890123456789012345678901"
@@ -109,7 +110,13 @@ func newBookingFixture(t *testing.T) *bookingFixture {
 	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, duration_minutes, price_irr) VALUES ($1, 'Other provider service', 30, 30000) RETURNING id`, f.otherProvider).Scan(&f.otherService); err != nil {
 		t.Fatalf("create second service: %v", err)
 	}
-	f.service = NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool))
+	walletService := wallet.NewService(pool)
+	for _, clientID := range []int64{f.clientID, f.otherClientID} {
+		if err := walletService.FundForDevelopment(ctx, clientID, 1_000_000, "fixture-"+strconv.FormatInt(clientID, 10)); err != nil {
+			t.Fatalf("fund fixture wallet: %v", err)
+		}
+	}
+	f.service = NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), walletService)
 	f.config = Config{
 		Availability: scheduling.AvailabilityPolicy{
 			SlotIncrement: 15 * time.Minute, MinimumNotice: 0, MaximumHorizon: 90 * 24 * time.Hour,

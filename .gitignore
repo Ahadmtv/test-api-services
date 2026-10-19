@@ -27,3 +27,7 @@ Thumbs.db
 # Coverage
 coverage.out
 coverage.html
+
+
+# local config
+builder.config.json

@@ -16,6 +16,7 @@ import (
 	"test-api/internal/catalog"
 	"test-api/internal/providers"
 	"test-api/internal/scheduling"
+	"test-api/internal/wallet"
 )
 
 type Booking struct {
@@ -55,23 +56,29 @@ type Service struct {
 	providers *providers.Service
 	catalog   *catalog.Store
 	schedule  *scheduling.Store
+	wallet    *wallet.Service
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func NewService(pool *pgxpool.Pool, providerProfiles *providers.Service, services *catalog.Store, schedule *scheduling.Store) *Service {
-	return &Service{Store: NewStore(pool), providers: providerProfiles, catalog: services, schedule: schedule}
+func NewService(pool *pgxpool.Pool, providerProfiles *providers.Service, services *catalog.Store, schedule *scheduling.Store, walletServices ...*wallet.Service) *Service {
+	walletService := wallet.NewService(pool)
+	if len(walletServices) > 0 && walletServices[0] != nil {
+		walletService = walletServices[0]
+	}
+	return &Service{Store: NewStore(pool), providers: providerProfiles, catalog: services, schedule: schedule, wallet: walletService}
 }
 
 var (
-	ErrInvalidInput       = errors.New("invalid booking input")
-	ErrServiceUnavailable = errors.New("service unavailable for booking")
-	ErrSlotUnavailable    = errors.New("requested booking slot unavailable")
-	ErrBookingNotFound    = errors.New("booking not found")
-	ErrInvalidTransition  = errors.New("invalid booking transition")
-	ErrCancellationClosed = errors.New("booking cancellation window closed")
+	ErrInvalidInput        = errors.New("invalid booking input")
+	ErrServiceUnavailable  = errors.New("service unavailable for booking")
+	ErrSlotUnavailable     = errors.New("requested booking slot unavailable")
+	ErrBookingNotFound     = errors.New("booking not found")
+	ErrForbidden           = errors.New("booking operation forbidden")
+	ErrInvalidTransition   = errors.New("invalid booking transition")
+	ErrCancellationClosed  = errors.New("booking cancellation window closed")
 	ErrIdempotencyConflict = errors.New("idempotency key payload conflict")
 )
 
@@ -197,21 +204,30 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 		return nil, fmt.Errorf("set booking audit context: %w", err)
 	}
 
+	paymentMethod := "wallet"
+	if service.PriceIRR == 0 {
+		paymentMethod = "none"
+	}
 	item, err := scanBooking(tx.QueryRow(ctx, `
 		INSERT INTO bookings (
 			client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status
+			duration_minutes, price_irr, buffer_minutes, status, payment_method
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'confirmed')
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'confirmed', $10)
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
 			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
 	`, clientID, providerID, service.ID, service.Name, startAt, endAt,
-		service.DurationMinutes, service.PriceIRR, service.BufferMinutes))
+		service.DurationMinutes, service.PriceIRR, service.BufferMinutes, paymentMethod))
 	if err != nil {
 		if isOverlapViolation(err) {
 			return nil, ErrSlotUnavailable
 		}
 		return nil, fmt.Errorf("insert booking: %w", err)
+	}
+	if item.PriceIRR > 0 {
+		if _, err := s.wallet.PlaceBookingHoldTx(ctx, tx, wallet.PlaceBookingHoldInput{BookingID: item.ID, CustomerID: clientID, ProviderID: providerID, AmountIRR: item.PriceIRR, RequestID: input.RequestID}); err != nil {
+			return nil, err
+		}
 	}
 	if input.IdempotencyKey != "" {
 		result, err := json.Marshal(item)
@@ -284,7 +300,7 @@ func (s *Store) list(ctx context.Context, predicate string, actorID, after int64
 	return items, hasMore, nil
 }
 
-func (s *Store) Start(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
+func (s *Service) Start(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
 	return s.transition(ctx, providerID, bookingID, "in_progress", "service_started", requestID, func(current Booking) error {
 		if current.ProviderID != providerID {
 			return ErrBookingNotFound
@@ -302,7 +318,7 @@ func (s *Store) Start(ctx context.Context, providerID, bookingID int64, requestI
 	})
 }
 
-func (s *Store) Cancel(ctx context.Context, clientID, bookingID int64, cutoff time.Duration, requestID string) (*Booking, error) {
+func (s *Service) Cancel(ctx context.Context, clientID, bookingID int64, cutoff time.Duration, requestID string) (*Booking, error) {
 	return s.transition(ctx, clientID, bookingID, "cancelled", "client_cancelled", requestID, func(current Booking) error {
 		if current.ClientID != clientID {
 			return ErrBookingNotFound
@@ -317,15 +333,91 @@ func (s *Store) Cancel(ctx context.Context, clientID, bookingID int64, cutoff ti
 			return ErrCancellationClosed
 		}
 		return nil
-	})
+	}, func(tx pgx.Tx) error { return s.wallet.ReleaseBookingHoldTx(ctx, tx, bookingID, clientID, requestID) })
 }
 
-func (s *Store) transition(ctx context.Context, actorID, bookingID int64, target, reason, requestID string, validate func(Booking) error) (*Booking, error) {
+func (s *Service) Refund(ctx context.Context, adminID, bookingID int64, idempotencyKey, requestID string) error {
+	if adminID < 1 || bookingID < 1 {
+		return wallet.ErrInvalidInput
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin booking refund: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var isAdmin bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM user_roles WHERE user_id = $1 AND role = 'admin')`, adminID).Scan(&isAdmin); err != nil {
+		return fmt.Errorf("check refund administrator role: %w", err)
+	}
+	if !isAdmin {
+		return ErrForbidden
+	}
+	var providerID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM bookings WHERE id = $1`, bookingID).Scan(&providerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrBookingNotFound
+		}
+		return fmt.Errorf("read refund booking provider: %w", err)
+	}
+	if _, err := s.providers.LockForBookingTx(ctx, tx, providerID); err != nil {
+		return err
+	}
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM bookings WHERE id = $1 FOR UPDATE`, bookingID).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrBookingNotFound
+		}
+		return fmt.Errorf("lock booking for refund: %w", err)
+	}
+	if status != "completed" {
+		return wallet.ErrNotReversible
+	}
+	if err := wallet.RefundBookingHoldTx(ctx, tx, bookingID, adminID, idempotencyKey, requestID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit booking refund: %w", err)
+	}
+	return nil
+}
+
+// Complete allows the owning provider to settle an in-progress wallet booking.
+func (s *Service) Complete(ctx context.Context, providerID, bookingID int64, requestID string) (*Booking, error) {
+	return s.transition(ctx, providerID, bookingID, "completed", "service_completed", requestID, func(current Booking) error {
+		if current.ProviderID != providerID {
+			return ErrBookingNotFound
+		}
+		if current.Status == "completed" {
+			return nil
+		}
+		if current.Status != "in_progress" {
+			return ErrInvalidTransition
+		}
+		return nil
+	}, func(tx pgx.Tx) error { return s.wallet.SettleBookingHoldTx(ctx, tx, bookingID, providerID, requestID) })
+}
+
+func (s *Service) transition(ctx context.Context, actorID, bookingID int64, target, reason, requestID string, validate func(Booking) error, effects ...func(pgx.Tx) error) (*Booking, error) {
+	effect := func(pgx.Tx) error { return nil }
+	if len(effects) > 0 {
+		effect = effects[0]
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin booking transition: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Preserve profile -> booking -> accounts locking order for wallet transitions.
+	var providerID int64
+	if err := tx.QueryRow(ctx, `SELECT provider_id FROM bookings WHERE id = $1`, bookingID).Scan(&providerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBookingNotFound
+		}
+		return nil, fmt.Errorf("read booking provider: %w", err)
+	}
+	if _, err := s.providers.LockForBookingTx(ctx, tx, providerID); err != nil {
+		return nil, err
+	}
 	current, err := scanBooking(tx.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
 			duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at
@@ -345,6 +437,9 @@ func (s *Store) transition(ctx context.Context, actorID, bookingID int64, target
 			return nil, fmt.Errorf("commit idempotent booking transition: %w", err)
 		}
 		return current, nil
+	}
+	if err := effect(tx); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
 		SELECT set_config('app.actor_type', 'user', true),
