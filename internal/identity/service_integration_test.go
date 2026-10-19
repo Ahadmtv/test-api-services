@@ -56,6 +56,9 @@ func TestServiceIntegration(t *testing.T) {
 
 	// Login
 	loginPair, err := service.Login(ctx, email, "secret1234")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
 	if loginPair.AccessToken == "" {
 		t.Fatal("login should issue access token")
 	}
