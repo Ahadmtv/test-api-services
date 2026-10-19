@@ -386,6 +386,82 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+  /api/v1/payments/zarinpal:
+    post:
+      summary: ایجاد درخواست شارژ کیف پول با Zarinpal
+      description: فقط مشتری احرازشده می‌تواند پرداخت صحیح IRR با حداقل 10000 ریال آغاز کند. درخواست بیرونی بدون retry خودکار ارسال می‌شود؛ callback proof نیست و فقط Verify server-to-server می‌تواند کیف پول را شارژ کند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCreateInput' }
+      responses:
+        '200':
+          description: همان idempotency key نتیجه terminal قبلی را برگرداند
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentCreateResponse' }
+        '201':
+          description: authority دریافت شد و redirect آماده است
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentCreateResponse' }
+        '202':
+          description: نتیجه ایجاد پرداخت نامطمئن است؛ درخواست بیرونی به‌طور خودکار تکرار نمی‌شود
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentCreateResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /api/v1/payments/zarinpal/callback:
+    get:
+      summary: callback بازگشت کاربر از Zarinpal
+      description: authority رکورد محلی را تعیین می‌کند؛ status فقط داده بازگشت است. موجودی فقط پس از Verify server-to-server و تطبیق با مبلغ و authority محلی تغییر می‌کند.
+      parameters:
+        - name: authority
+          in: query
+          required: true
+          schema: { type: string, pattern: '^[AS][A-Za-z0-9]{35}$' }
+        - name: status
+          in: query
+          required: false
+          description: مقدار بازگشتی gateway؛ برای اعتباردهی به آن اعتماد نمی‌شود
+          schema: { type: string, maxLength: 32 }
+      responses:
+        '204': { description: callback پردازش شد یا نتیجه قبلی حفظ شد }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /api/v1/payments/{paymentID}:
+    get:
+      summary: دریافت وضعیت پرداخت متعلق به مشتری
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: paymentID
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: وضعیت و اطلاعات مجاز پرداخت
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /api/v1/admin/bookings/{bookingID}/refund:
     post:
       summary: بازپرداخت رزرو تکمیل‌شده
@@ -781,6 +857,30 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/WalletTransaction' } }
         next_cursor: { type: [integer, 'null'], format: int64 }
+    PaymentCreateInput:
+      type: object
+      additionalProperties: false
+      required: [amount_irr]
+      properties:
+        amount_irr: { type: integer, format: int64, minimum: 10000, description: مبلغ صحیح ریال؛ Zarinpal آن را به ریال دریافت می‌کند }
+    Payment:
+      type: object
+      required: [id, amount_irr, status, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        amount_irr: { type: integer, format: int64, minimum: 10000 }
+        status: { type: string, enum: [created, pending, succeeded, failed, verification_unknown] }
+        authority: { type: [string, 'null'] }
+        gateway_reference_id: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        succeeded_at: { type: [string, 'null'], format: date-time }
+    PaymentCreateResponse:
+      type: object
+      required: [payment]
+      properties:
+        payment: { $ref: '#/components/schemas/Payment' }
+        redirect_url: { type: string, format: uri }
     BookingCreateInput:
       type: object
       additionalProperties: false

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ type Config struct {
 	Auth         AuthConfig
 	Availability AvailabilityConfig
 	Booking      BookingConfig
+	Payments     PaymentConfig
 	Version      string
 }
 
@@ -32,6 +34,12 @@ type AvailabilityConfig struct {
 
 type BookingConfig struct {
 	CancellationCutoff time.Duration
+}
+
+type PaymentConfig struct {
+	Environment string
+	MerchantID  string
+	CallbackURL string
 }
 
 type AuthConfig struct {
@@ -126,11 +134,27 @@ func LoadConfig() (*Config, error) {
 		},
 	}
 
+	cfg.Payments = PaymentConfig{
+		Environment: firstNonEmpty(os.Getenv("PAYMENT_ENVIRONMENT"), "sandbox"),
+		MerchantID:  os.Getenv("ZARINPAL_MERCHANT_ID"),
+		CallbackURL: os.Getenv("PAYMENT_CALLBACK_URL"),
+	}
+
 	if missing := requiredMissing(
 		"DB_USER", cfg.DB.User,
 		"DB_NAME", cfg.DB.Name,
 	); len(missing) > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrMissingConfig, strings.Join(missing, ", "))
+	}
+
+	if cfg.Payments.Environment != "sandbox" && cfg.Payments.Environment != "production" {
+		return nil, fmt.Errorf("PAYMENT_ENVIRONMENT must be sandbox or production")
+	}
+	if cfg.Payments.CallbackURL != "" {
+		parsed, err := url.ParseRequestURI(cfg.Payments.CallbackURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, fmt.Errorf("PAYMENT_CALLBACK_URL must be an absolute HTTP URL")
+		}
 	}
 
 	if cfg.Log.Format != "json" && cfg.Log.Format != "text" {

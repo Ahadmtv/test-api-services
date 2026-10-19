@@ -17,6 +17,7 @@ import (
 	"test-api/internal/booking"
 	"test-api/internal/catalog"
 	"test-api/internal/identity"
+	"test-api/internal/payments"
 	"test-api/internal/platform"
 	"test-api/internal/providerapi"
 	"test-api/internal/providers"
@@ -52,6 +53,19 @@ func run(ctx context.Context, args []string) error {
 	defer db.Close()
 
 	if len(args) > 0 {
+		if args[0] == "payments-reconcile" {
+			gateway, err := payments.NewZarinpalGateway(cfg.Payments.MerchantID, payments.ZarinpalEnvironment(cfg.Payments.Environment))
+			if err != nil {
+				return fmt.Errorf("payment gateway configuration: %w", err)
+			}
+			service := payments.NewService(db.Pool(), wallet.NewService(db.Pool()), gateway, cfg.Payments.CallbackURL)
+			resolved, err := service.ReconcileUnknown(ctx, 100)
+			if err != nil {
+				return fmt.Errorf("reconcile uncertain payments: %w", err)
+			}
+			logger.Info("payment reconciliation completed", "resolved", resolved)
+			return nil
+		}
 		return runMigration(ctx, args[0], db, logger)
 	}
 
@@ -89,6 +103,11 @@ func run(ctx context.Context, args []string) error {
 	}
 	walletService := wallet.NewService(db.Pool())
 	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	paymentGateway, err := payments.NewZarinpalGateway(cfg.Payments.MerchantID, payments.ZarinpalEnvironment(cfg.Payments.Environment))
+	if err != nil {
+		return fmt.Errorf("payment gateway configuration: %w", err)
+	}
+	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	bookingHandler := booking.NewHandler(booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), walletService), bookingConfig)
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 

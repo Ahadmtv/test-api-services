@@ -132,10 +132,10 @@ func TestLoadConfigRejectsInvalidAvailabilitySettings(t *testing.T) {
 
 func TestLoadConfigBookingPolicyOverrides(t *testing.T) {
 	envWith(t, map[string]string{
-		"DB_USER":                       "tester",
-		"DB_NAME":                       "testdb",
-		"AUTH_ACCESS_TOKEN_SECRET":      "01234567890123456789012345678901",
-		"BOOKING_CANCELLATION_CUTOFF":   "1h",
+		"DB_USER":                     "tester",
+		"DB_NAME":                     "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET":    "01234567890123456789012345678901",
+		"BOOKING_CANCELLATION_CUTOFF": "1h",
 	})
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -162,6 +162,26 @@ func TestLoadConfigRejectsInvalidBookingPolicy(t *testing.T) {
 				t.Fatalf("expected invalid booking setting %s=%s", tc.name, tc.value)
 			}
 		})
+	}
+}
+
+func TestLoadConfigPaymentEnvironmentDefaultsToSandboxAndAllowsExplicitProduction(t *testing.T) {
+	t.Setenv("DB_USER", "tester")
+	t.Setenv("DB_NAME", "testdb")
+	t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
+	t.Setenv("PAYMENT_ENVIRONMENT", "")
+	cfg, err := LoadConfig()
+	if err != nil || cfg.Payments.Environment != "sandbox" {
+		t.Fatalf("default payment environment=%+v error=%v", cfg, err)
+	}
+	t.Setenv("PAYMENT_ENVIRONMENT", "production")
+	cfg, err = LoadConfig()
+	if err != nil || cfg.Payments.Environment != "production" {
+		t.Fatalf("production payment environment=%+v error=%v", cfg, err)
+	}
+	t.Setenv("PAYMENT_ENVIRONMENT", "unknown")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("unsupported payment environment accepted")
 	}
 }
 

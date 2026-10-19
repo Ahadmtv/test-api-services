@@ -152,6 +152,31 @@ func (s *Service) SettleBookingHoldTx(ctx context.Context, tx pgx.Tx, bookingID,
 	return SettleBookingHoldTx(ctx, tx, bookingID, actorID, requestID)
 }
 
+func (s *Service) CreditPaymentTx(ctx context.Context, tx pgx.Tx, userID, paymentID, amountIRR int64, requestID string) error {
+	if userID < 1 || paymentID < 1 || requestID == "" {
+		return ErrInvalidInput
+	}
+	if err := validateAmount(amountIRR); err != nil {
+		return err
+	}
+	transactionID, err := postTx(ctx, tx, posting{
+		reference: fmt.Sprintf("payment:%d:funding", paymentID),
+		kind:      txFunding,
+		actorID:   userID,
+		requestID: requestID,
+		entries: []entry{
+			{account: accountRef{kind: kindFundingClearing}, side: sideDebit, amount: amountIRR},
+			{account: accountRef{ownerID: userID, kind: kindCustomerAvailable}, side: sideCredit, amount: amountIRR},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return auditTx(ctx, tx, userID, "wallet.funding.payment", "payment_attempt", paymentID, requestID, map[string]any{
+		"amount_irr": amountIRR, "ledger_transaction_id": transactionID,
+	})
+}
+
 // FundForDevelopment credits a customer only for local development and tests. It has no HTTP endpoint.
 func (s *Service) FundForDevelopment(ctx context.Context, userID, amountIRR int64, requestID string) error {
 	if userID < 1 || requestID == "" || len(requestID) > 128 {
