@@ -212,7 +212,7 @@ func setupE2E(t *testing.T) *e2eEnv {
 	walletService := wallet.NewService(pool)
 	wallet.NewHandler(walletService).Register(fiberApp, e2eSecret)
 	gateway := &payments.FakeGateway{}
-	payments.NewHandler(payments.NewService(pool, walletService, gateway, "https://test.local/api/v1/payments/zarinpal/callback"), auth.NewRateLimiter(1000)).Register(fiberApp, e2eSecret)
+	payments.NewHandler(payments.NewService(pool, walletService, gateway, "https://test.local/api/v1/payments/zarinpal/callback"), auth.NewRateLimiter(1000), "").Register(fiberApp, e2eSecret)
 	bookingConfig := booking.Config{Availability: policy, CompletionDisputeWindow: 24 * time.Hour}
 	bookingService := booking.NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), bookingConfig, walletService)
 	booking.NewHandler(bookingService, bookingConfig).Register(fiberApp, e2eSecret)

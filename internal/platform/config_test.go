@@ -178,13 +178,41 @@ func TestLoadConfigPaymentEnvironmentDefaultsToSandboxAndAllowsExplicitProductio
 		t.Fatalf("default payment environment=%+v error=%v", cfg, err)
 	}
 	t.Setenv("PAYMENT_ENVIRONMENT", "production")
+	t.Setenv("PAYMENT_RETURN_URL", "https://app.example.test/wallet/payment/result")
 	cfg, err = LoadConfig()
 	if err != nil || cfg.Payments.Environment != "production" {
 		t.Fatalf("production payment environment=%+v error=%v", cfg, err)
 	}
+	if cfg.Payments.ReturnURL != "https://app.example.test/wallet/payment/result" {
+		t.Fatalf("payment return url=%q", cfg.Payments.ReturnURL)
+	}
 	t.Setenv("PAYMENT_ENVIRONMENT", "unknown")
 	if _, err := LoadConfig(); err == nil {
 		t.Fatal("unsupported payment environment accepted")
+	}
+}
+
+func TestLoadConfigRequiresPaymentReturnURLInProduction(t *testing.T) {
+	t.Setenv("DB_USER", "tester")
+	t.Setenv("DB_NAME", "testdb")
+	t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
+	t.Setenv("PAYMENT_ENVIRONMENT", "production")
+	t.Setenv("PAYMENT_RETURN_URL", "")
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "PAYMENT_RETURN_URL") {
+		t.Fatalf("expected missing PAYMENT_RETURN_URL error, got %v", err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidPaymentReturnURL(t *testing.T) {
+	t.Setenv("DB_USER", "tester")
+	t.Setenv("DB_NAME", "testdb")
+	t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
+	t.Setenv("PAYMENT_RETURN_URL", "//app.example.test/wallet/payment/result")
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("protocol-relative payment return URL accepted")
 	}
 }
 

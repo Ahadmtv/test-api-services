@@ -251,7 +251,7 @@ func TestPaymentStartIdempotencyAndAuthorization(t *testing.T) {
 
 	app := fiber.New(fiber.Config{ErrorHandler: platform.ErrorHandler(slog.New(slog.NewTextHandler(io.Discard, nil)))})
 	app.Use(platform.RequestID())
-	NewHandler(f.service, nil).Register(app, testAccessSecret)
+	NewHandler(f.service, nil, "").Register(app, testAccessSecret)
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/v1/payments/zarinpal", strings.NewReader(`{"amount_irr":10000}`)))
 	if err != nil {
 		t.Fatal(err)

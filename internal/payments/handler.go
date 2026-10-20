@@ -15,10 +15,11 @@ import (
 type Handler struct {
 	service     *Service
 	rateLimiter *auth.RateLimiter
+	returnURL   string
 }
 
-func NewHandler(service *Service, rateLimiter *auth.RateLimiter) *Handler {
-	return &Handler{service: service, rateLimiter: rateLimiter}
+func NewHandler(service *Service, rateLimiter *auth.RateLimiter, returnURL string) *Handler {
+	return &Handler{service: service, rateLimiter: rateLimiter, returnURL: returnURL}
 }
 
 func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
@@ -86,7 +87,10 @@ func (h *Handler) Callback(c fiber.Ctx) error {
 	if _, err := h.service.HandleCallback(c.Context(), authority, callbackStatus, requestID(c)); err != nil {
 		return paymentError(err)
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	if h.returnURL == "" {
+		return c.SendStatus(fiber.StatusNoContent)
+	}
+	return c.Redirect().To(h.returnURL)
 }
 
 func queryValue(c fiber.Ctx, names ...string) string {

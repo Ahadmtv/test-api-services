@@ -48,6 +48,7 @@ type PaymentConfig struct {
 	Environment string
 	MerchantID  string
 	CallbackURL string
+	ReturnURL   string
 }
 
 type AuthConfig struct {
@@ -151,6 +152,7 @@ func LoadConfig() (*Config, error) {
 		Environment: firstNonEmpty(os.Getenv("PAYMENT_ENVIRONMENT"), "sandbox"),
 		MerchantID:  os.Getenv("ZARINPAL_MERCHANT_ID"),
 		CallbackURL: os.Getenv("PAYMENT_CALLBACK_URL"),
+		ReturnURL:   os.Getenv("PAYMENT_RETURN_URL"),
 	}
 
 	if missing := requiredMissing(
@@ -163,11 +165,14 @@ func LoadConfig() (*Config, error) {
 	if cfg.Payments.Environment != "sandbox" && cfg.Payments.Environment != "production" {
 		return nil, fmt.Errorf("PAYMENT_ENVIRONMENT must be sandbox or production")
 	}
-	if cfg.Payments.CallbackURL != "" {
-		parsed, err := url.ParseRequestURI(cfg.Payments.CallbackURL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return nil, fmt.Errorf("PAYMENT_CALLBACK_URL must be an absolute HTTP URL")
-		}
+	if cfg.Payments.CallbackURL != "" && !isAbsoluteHTTPURL(cfg.Payments.CallbackURL) {
+		return nil, fmt.Errorf("PAYMENT_CALLBACK_URL must be an absolute HTTP URL")
+	}
+	if cfg.Payments.ReturnURL != "" && !isAbsoluteHTTPURL(cfg.Payments.ReturnURL) {
+		return nil, fmt.Errorf("PAYMENT_RETURN_URL must be an absolute HTTP URL")
+	}
+	if cfg.Payments.Environment == "production" && cfg.Payments.ReturnURL == "" {
+		return nil, fmt.Errorf("%w: PAYMENT_RETURN_URL", ErrMissingConfig)
 	}
 
 	if cfg.Log.Format != "json" && cfg.Log.Format != "text" {
@@ -270,6 +275,17 @@ func (c DBConfig) DSN() string {
 	b.WriteString("?sslmode=")
 	b.WriteString(c.SSLMode)
 	return b.String()
+}
+
+func isAbsoluteHTTPURL(value string) bool {
+	if strings.Contains(value, "#") {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
 
 func requiredMissing(namesAndValues ...string) []string {

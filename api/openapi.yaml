@@ -529,7 +529,7 @@ paths:
   /api/v1/payments/zarinpal/callback:
     get:
       summary: callback بازگشت کاربر از Zarinpal
-      description: پارامترهای Authority و Status مطابق callback واقعی Zarinpal هستند و نام‌های lowercase نیز برای سازگاری پذیرفته می‌شوند. authority رکورد محلی را تعیین می‌کند؛ status فقط داده بازگشت است. موجودی فقط پس از Verify server-to-server و تطبیق با مبلغ و authority محلی تغییر می‌کند.
+      description: پارامترهای Authority و Status مطابق callback واقعی Zarinpal هستند و نام‌های lowercase نیز برای سازگاری پذیرفته می‌شوند. authority رکورد محلی را تعیین می‌کند؛ status فقط داده بازگشت است. موجودی فقط پس از Verify server-to-server و تطبیق با مبلغ و authority محلی تغییر می‌کند. پس از پردازش، مرورگر با هدایت 303 به `PAYMENT_RETURN_URL` (صفحه نتیجه اپ) فرستاده می‌شود.
       parameters:
         - name: Authority
           in: query
@@ -541,7 +541,13 @@ paths:
           description: مقدار بازگشتی gateway؛ برای اعتباردهی به آن اعتماد نمی‌شود
           schema: { type: string, maxLength: 32 }
       responses:
-        '204': { description: callback پردازش شد یا نتیجه قبلی حفظ شد؛ بدنه‌ای برای نمایش به کاربر برنمی‌گردد و صفحه نتیجه فرانت‌اند تصمیم جداگانه باز است }
+        '303':
+          description: callback پردازش شد یا نتیجه قبلی حفظ شد؛ مرورگر به صفحه نتیجه فرانت‌اند هدایت می‌شود
+          headers:
+            Location:
+              description: نشانی مطلق صفحه نتیجه که در PAYMENT_RETURN_URL تنظیم شده است
+              schema: { type: string, format: uri }
+        '204': { description: callback پردازش شد؛ فقط در محیط sandbox بدون PAYMENT_RETURN_URL برای سازگاری برگردانده می‌شود }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }

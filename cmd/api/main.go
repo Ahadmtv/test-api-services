@@ -130,7 +130,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("payment gateway configuration: %w", err)
 	}
-	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL), rateLimiter).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL), rateLimiter, cfg.Payments.ReturnURL).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
 	bookingHandler := booking.NewHandler(bookingService, bookingConfigFrom(cfg))
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
