@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/golang-jwt/jwt/v5"
 
 	"test-api/internal/identity"
 	"test-api/internal/platform"
@@ -25,7 +27,8 @@ func Authenticator(accessTokenSecret string) fiber.Handler {
 
 		claims, err := identity.ParseAccessToken(parts[1], accessTokenSecret)
 		if err != nil {
-			return platform.NewAppError("unauthenticated", "توکن نامعتبر یا منقضی شده است", 401, nil)
+			code, message := accessTokenError(err)
+			return platform.NewAppError(code, message, 401, nil)
 		}
 
 		roles := claims.Roles
@@ -39,6 +42,21 @@ func Authenticator(accessTokenSecret string) fiber.Handler {
 			Roles:  roles,
 		})
 		return c.Next()
+	}
+}
+
+func accessTokenError(err error) (code string, message string) {
+	switch {
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return "token_expired", "توکن دسترسی منقضی شده است"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return "invalid_signature", "امضای توکن نامعتبر است"
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "malformed_token", "ساختار توکن نامعتبر است"
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return "token_not_active", "توکن هنوز فعال نیست"
+	default:
+		return "invalid_token", "توکن نامعتبر است"
 	}
 }
 
