@@ -12,7 +12,11 @@ services:
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"${DB_USER:-booker}\" -d \"${DB_NAME:-bookings}\""]
+      test:
+        [
+          "CMD-SHELL",
+          'pg_isready -U "${DB_USER:-booker}" -d "${DB_NAME:-bookings}"',
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -53,7 +57,6 @@ services:
       BOOKING_CANCELLATION_CUTOFF: ${BOOKING_CANCELLATION_CUTOFF:-0s}
     ports:
       - "${HTTP_PORT:-8080}:8080"
-    command: ["/bin/api"]
 
 volumes:
   dbdata:
