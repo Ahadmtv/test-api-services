@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +18,10 @@ const (
 	zarinpalRequestPath = "/pg/v4/payment/request.json"
 	zarinpalVerifyPath  = "/pg/v4/payment/verify.json"
 	zarinpalStartPath   = "/pg/StartPay/"
+
+	// Zarinpal sandbox accepts any UUID as merchant_id; production requires the
+	// merchant identifier issued by Zarinpal.
+	defaultSandboxMerchantID = "00000000-0000-4000-8000-000000000001"
 )
 
 type ZarinpalEnvironment string
@@ -41,8 +46,19 @@ func NewZarinpalGateway(merchantID string, environment ZarinpalEnvironment) (*Za
 	default:
 		return nil, fmt.Errorf("invalid Zarinpal environment")
 	}
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		if environment == ZarinpalSandbox {
+			merchantID = defaultSandboxMerchantID
+		} else {
+			return nil, fmt.Errorf("%w: ZARINPAL_MERCHANT_ID is required in production", ErrGatewayUnavailable)
+		}
+	}
+	if !validMerchantID(merchantID) {
+		return nil, fmt.Errorf("%w: ZARINPAL_MERCHANT_ID must be a 36-character UUID", ErrGatewayUnavailable)
+	}
 	return &ZarinpalGateway{
-		merchantID: strings.TrimSpace(merchantID),
+		merchantID: merchantID,
 		baseURL:    baseURL,
 		client: &http.Client{
 			Timeout: 12 * time.Second,
@@ -78,8 +94,7 @@ func (g *ZarinpalGateway) Create(ctx context.Context, request CreateRequest) (Cr
 	if err != nil {
 		return CreatedPayment{}, err
 	}
-	defer response.Close()
-	decoder := json.NewDecoder(io.LimitReader(response, 1<<20))
+	decoder := json.NewDecoder(bytes.NewReader(response))
 	decoder.UseNumber()
 	var envelope struct {
 		Data struct {
@@ -88,11 +103,17 @@ func (g *ZarinpalGateway) Create(ctx context.Context, request CreateRequest) (Cr
 		} `json:"data"`
 	}
 	if decoder.Decode(&envelope) != nil {
-		return CreatedPayment{}, ErrGatewayUnknownOutcome
+		return CreatedPayment{}, ErrGatewayMalformed
 	}
 	code, err := envelope.Data.Code.Int64()
-	if err != nil || code != 100 || !validAuthority(envelope.Data.Authority) {
-		return CreatedPayment{}, ErrGatewayUnknownOutcome
+	if err != nil {
+		return CreatedPayment{}, ErrGatewayMalformed
+	}
+	if code != 100 {
+		return CreatedPayment{}, fmt.Errorf("%w: code %d", ErrGatewayRejected, code)
+	}
+	if !validAuthority(envelope.Data.Authority) {
+		return CreatedPayment{}, ErrGatewayMalformed
 	}
 	return CreatedPayment{Authority: envelope.Data.Authority}, nil
 }
@@ -117,8 +138,7 @@ func (g *ZarinpalGateway) Verify(ctx context.Context, request VerifyRequest) (Ve
 	if err != nil {
 		return Verification{}, err
 	}
-	defer response.Close()
-	decoder := json.NewDecoder(io.LimitReader(response, 1<<20))
+	decoder := json.NewDecoder(bytes.NewReader(response))
 	decoder.UseNumber()
 	var envelope struct {
 		Data struct {
@@ -127,11 +147,11 @@ func (g *ZarinpalGateway) Verify(ctx context.Context, request VerifyRequest) (Ve
 		} `json:"data"`
 	}
 	if decoder.Decode(&envelope) != nil {
-		return Verification{}, ErrGatewayUnknownOutcome
+		return Verification{}, ErrGatewayMalformed
 	}
 	code, err := envelope.Data.Code.Int64()
 	if err != nil {
-		return Verification{}, ErrGatewayUnknownOutcome
+		return Verification{}, ErrGatewayMalformed
 	}
 	// The verify response does not echo authority or amount; these fields reflect the request only.
 	result := Verification{
@@ -143,11 +163,11 @@ func (g *ZarinpalGateway) Verify(ctx context.Context, request VerifyRequest) (Ve
 	case 100, 101:
 		result.ReferenceID, err = scalarReference(envelope.Data.RefID)
 		if err != nil {
-			return Verification{}, ErrGatewayUnknownOutcome
+			return Verification{}, ErrGatewayMalformed
 		}
 		result.Approved = true
 	default:
-		return Verification{}, ErrGatewayUnknownOutcome
+		return Verification{}, fmt.Errorf("%w: code %d", ErrGatewayRejected, code)
 	}
 	return result, nil
 }
@@ -159,22 +179,59 @@ func (g *ZarinpalGateway) RedirectURL(authority string) (string, error) {
 	return g.baseURL + zarinpalStartPath + url.PathEscape(authority), nil
 }
 
-func (g *ZarinpalGateway) post(ctx context.Context, path string, body []byte) (io.ReadCloser, error) {
+func (g *ZarinpalGateway) post(ctx context.Context, path string, body []byte) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, g.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, ErrGatewayUnknownOutcome
+		return nil, ErrGatewayTransport
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	response, err := g.client.Do(request)
 	if err != nil {
-		return nil, ErrGatewayUnknownOutcome
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return nil, ErrGatewayTimeout
+		}
+		return nil, ErrGatewayTransport
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read response body", ErrGatewayTransport)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		response.Body.Close()
-		return nil, ErrGatewayUnknownOutcome
+		if response.StatusCode >= 400 && response.StatusCode < 500 &&
+			response.StatusCode != http.StatusRequestTimeout &&
+			response.StatusCode != http.StatusTooManyRequests {
+			if code := rejectionCode(responseBody); code != "" {
+				return nil, fmt.Errorf("%w: HTTP %d code %s", ErrGatewayRejected, response.StatusCode, code)
+			}
+			return nil, fmt.Errorf("%w: HTTP %d", ErrGatewayRejected, response.StatusCode)
+		}
+		return nil, fmt.Errorf("%w: HTTP %d", ErrGatewayHTTPStatus, response.StatusCode)
 	}
-	return response.Body, nil
+	return responseBody, nil
+}
+
+func rejectionCode(body []byte) string {
+	var envelope struct {
+		Errors json.RawMessage `json:"errors"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || len(envelope.Errors) == 0 {
+		return ""
+	}
+	type apiError struct {
+		Code json.Number `json:"code"`
+	}
+	var single apiError
+	if json.Unmarshal(envelope.Errors, &single) == nil {
+		return single.Code.String()
+	}
+	var list []apiError
+	if json.Unmarshal(envelope.Errors, &list) == nil && len(list) > 0 {
+		return list[0].Code.String()
+	}
+	return ""
 }
 
 func scalarReference(value any) (string, error) {
@@ -192,6 +249,27 @@ func scalarReference(value any) (string, error) {
 	default:
 		return "", errors.New("invalid gateway reference")
 	}
+}
+
+func validMerchantID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if value[i] != '-' {
+				return false
+			}
+			continue
+		}
+		character := value[i]
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'f') ||
+			(character >= 'A' && character <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func validCallbackURL(raw string) bool {

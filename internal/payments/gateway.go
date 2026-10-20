@@ -11,6 +11,10 @@ var (
 	ErrGatewayUnknownOutcome = errors.New("payment gateway outcome is unknown")
 	ErrGatewayRejected       = errors.New("payment gateway rejected the operation")
 	ErrGatewayUnavailable    = errors.New("payment gateway is not configured")
+	ErrGatewayTimeout        = errors.New("payment gateway request timed out")
+	ErrGatewayTransport      = errors.New("payment gateway transport failed")
+	ErrGatewayHTTPStatus     = errors.New("payment gateway returned an unexpected HTTP status")
+	ErrGatewayMalformed      = errors.New("payment gateway response is malformed")
 )
 
 type Gateway interface {

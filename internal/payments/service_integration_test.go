@@ -215,6 +215,15 @@ func TestPaymentCreateUnknownOutcomeIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestPaymentCreateRejectionIsPersistedAsFailed(t *testing.T) {
+	f := newPaymentFixture(t)
+	f.gateway.NextCreateErr = ErrGatewayRejected
+	payment, redirect, err := f.service.Start(context.Background(), f.userID, 10_000, "rejected-create", "request-rejected-create")
+	if err != nil || payment.Status != "failed" || redirect != "" || payment.Authority != nil {
+		t.Fatalf("payment=%+v redirect=%q error=%v", payment, redirect, err)
+	}
+}
+
 func TestPaymentStartRejectsAmountBelowDocumentedMinimum(t *testing.T) {
 	f := newPaymentFixture(t)
 	if _, _, err := f.service.Start(context.Background(), f.userID, OfficialMinimumAmountIRR-1, "small-amount", "request-small-amount"); !errors.Is(err, ErrInvalidInput) {

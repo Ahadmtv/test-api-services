@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const testMerchantID = "00000000-0000-4000-8000-000000000002"
+
 func TestZarinpalCreateUsesDocumentedIRRRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != zarinpalRequestPath {
@@ -63,30 +65,38 @@ func TestZarinpalVerifyParsesOfficialResponse(t *testing.T) {
 	}
 }
 
-func TestZarinpalUnknownOutcomesAreNotAccepted(t *testing.T) {
+func TestZarinpalMalformedResponsesAreNotAccepted(t *testing.T) {
 	for _, response := range []struct {
 		name string
-		code int
 		body string
 	}{
-		{name: "malformed", body: `{"data":`},
-		{name: "missing authority", code: 100, body: `{"data":{"code":100}}`},
-		{name: "unknown code", code: 999, body: `{"data":{"code":999}}`},
-		{name: "already verified without reference", code: 101, body: `{"data":{"code":101}}`},
+		{name: "malformed create response", body: `{"data":`},
+		{name: "missing create authority", body: `{"data":{"code":100}}`},
 	} {
 		t.Run(response.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(response.body)) }))
 			defer server.Close()
 			gateway := testGateway(server)
-			if response.name == "missing authority" || response.name == "malformed" {
-				_, err := gateway.Create(context.Background(), CreateRequest{AmountIRR: 10_000, CallbackURL: "https://example.test/callback", Description: "test"})
-				if !errors.Is(err, ErrGatewayUnknownOutcome) {
-					t.Fatalf("create error=%v", err)
-				}
-				return
+			_, err := gateway.Create(context.Background(), CreateRequest{AmountIRR: 10_000, CallbackURL: "https://example.test/callback", Description: "test"})
+			if !errors.Is(err, ErrGatewayMalformed) {
+				t.Fatalf("create error=%v", err)
 			}
+		})
+	}
+	for _, response := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed verify response", body: `{"data":`},
+		{name: "missing verify code", body: `{"data":{}}`},
+		{name: "already verified without reference", body: `{"data":{"code":101}}`},
+	} {
+		t.Run(response.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(response.body)) }))
+			defer server.Close()
+			gateway := testGateway(server)
 			result, err := gateway.Verify(context.Background(), VerifyRequest{Authority: "A0000000000000000000000000006qpmlj8d", AmountIRR: 10_000})
-			if !errors.Is(err, ErrGatewayUnknownOutcome) {
+			if !errors.Is(err, ErrGatewayMalformed) {
 				t.Fatalf("verify result=%+v error=%v", result, err)
 			}
 		})
@@ -109,13 +119,30 @@ func TestZarinpalVerifyAcceptsAlreadyVerifiedResponseWithReference(t *testing.T)
 	}
 }
 
-func TestZarinpalTransportErrorsAreUnknown(t *testing.T) {
+func TestZarinpalStructuredGatewayRejectionIsDefinitive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"data":{},"errors":{"code":-9,"message":"The merchant id field is required.","validations":[]}}`))
+	}))
+	defer server.Close()
+
+	gateway := testGateway(server)
+	_, err := gateway.Create(context.Background(), CreateRequest{AmountIRR: 10_000, CallbackURL: "https://example.test/callback", Description: "test"})
+	if !errors.Is(err, ErrGatewayRejected) {
+		t.Fatalf("create error=%v", err)
+	}
+	if errors.Is(err, ErrGatewayUnknownOutcome) {
+		t.Fatalf("rejection classified as unknown: %v", err)
+	}
+}
+
+func TestZarinpalTransportErrorsAreClassified(t *testing.T) {
 	t.Run("http error", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 		defer server.Close()
 		gateway := testGateway(server)
 		_, err := gateway.Create(context.Background(), CreateRequest{AmountIRR: 10_000, CallbackURL: "https://example.test/callback", Description: "test"})
-		if !errors.Is(err, ErrGatewayUnknownOutcome) {
+		if !errors.Is(err, ErrGatewayHTTPStatus) {
 			t.Fatalf("error=%v", err)
 		}
 	})
@@ -128,7 +155,7 @@ func TestZarinpalTransportErrorsAreUnknown(t *testing.T) {
 		gateway := testGateway(server)
 		gateway.client.Timeout = time.Millisecond
 		_, err := gateway.Create(context.Background(), CreateRequest{AmountIRR: 10_000, CallbackURL: "https://example.test/callback", Description: "test"})
-		if !errors.Is(err, ErrGatewayUnknownOutcome) {
+		if !errors.Is(err, ErrGatewayTimeout) {
 			t.Fatalf("error=%v", err)
 		}
 	})
@@ -139,7 +166,7 @@ func TestZarinpalRedirectUsesExplicitEnvironment(t *testing.T) {
 		{string(ZarinpalSandbox), "https://sandbox.zarinpal.com/pg/StartPay/A0000000000000000000000000006qpmlj8d"},
 		{string(ZarinpalProduction), "https://payment.zarinpal.com/pg/StartPay/A0000000000000000000000000006qpmlj8d"},
 	} {
-		gateway, err := NewZarinpalGateway("merchant-test", ZarinpalEnvironment(test.environment))
+		gateway, err := NewZarinpalGateway(testMerchantID, ZarinpalEnvironment(test.environment))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,13 +175,32 @@ func TestZarinpalRedirectUsesExplicitEnvironment(t *testing.T) {
 			t.Fatalf("redirect=%q error=%v", redirect, err)
 		}
 	}
-	if _, err := NewZarinpalGateway("merchant-test", "unknown"); err == nil {
+	if _, err := NewZarinpalGateway(testMerchantID, "unknown"); err == nil {
 		t.Fatal("invalid environment accepted")
 	}
 }
 
+func TestZarinpalSandboxUsesDocumentedPlaceholderMerchant(t *testing.T) {
+	gateway, err := NewZarinpalGateway("", ZarinpalSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gateway.Configured() || gateway.merchantID != defaultSandboxMerchantID {
+		t.Fatalf("sandbox merchant configured=%v", gateway.Configured())
+	}
+}
+
+func TestZarinpalProductionRequiresMerchantID(t *testing.T) {
+	if _, err := NewZarinpalGateway("", ZarinpalProduction); !errors.Is(err, ErrGatewayUnavailable) {
+		t.Fatalf("production missing merchant error=%v", err)
+	}
+	if _, err := NewZarinpalGateway("merchant-test", ZarinpalSandbox); !errors.Is(err, ErrGatewayUnavailable) {
+		t.Fatalf("malformed merchant error=%v", err)
+	}
+}
+
 func TestGatewayRequiresDocumentedMinimumAmount(t *testing.T) {
-	gateway, err := NewZarinpalGateway("merchant-test", ZarinpalSandbox)
+	gateway, err := NewZarinpalGateway(testMerchantID, ZarinpalSandbox)
 	if err != nil {
 		t.Fatal(err)
 	}

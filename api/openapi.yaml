@@ -529,13 +529,13 @@ paths:
   /api/v1/payments/zarinpal/callback:
     get:
       summary: callback بازگشت کاربر از Zarinpal
-      description: authority رکورد محلی را تعیین می‌کند؛ status فقط داده بازگشت است. موجودی فقط پس از Verify server-to-server و تطبیق با مبلغ و authority محلی تغییر می‌کند.
+      description: پارامترهای Authority و Status مطابق callback واقعی Zarinpal هستند و نام‌های lowercase نیز برای سازگاری پذیرفته می‌شوند. authority رکورد محلی را تعیین می‌کند؛ status فقط داده بازگشت است. موجودی فقط پس از Verify server-to-server و تطبیق با مبلغ و authority محلی تغییر می‌کند.
       parameters:
-        - name: authority
+        - name: Authority
           in: query
           required: true
           schema: { type: string, pattern: '^[AS][A-Za-z0-9]{35}$' }
-        - name: status
+        - name: Status
           in: query
           required: false
           description: مقدار بازگشتی gateway؛ برای اعتباردهی به آن اعتماد نمی‌شود

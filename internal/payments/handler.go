@@ -81,10 +81,21 @@ func (h *Handler) Get(c fiber.Ctx) error {
 }
 
 func (h *Handler) Callback(c fiber.Ctx) error {
-	if _, err := h.service.HandleCallback(c.Context(), c.Query("authority"), c.Query("status"), requestID(c)); err != nil {
+	authority := queryValue(c, "authority", "Authority")
+	callbackStatus := queryValue(c, "status", "Status")
+	if _, err := h.service.HandleCallback(c.Context(), authority, callbackStatus, requestID(c)); err != nil {
 		return paymentError(err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func queryValue(c fiber.Ctx, names ...string) string {
+	for _, name := range names {
+		if value := c.Query(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func paymentPrincipal(c fiber.Ctx) identity.Principal {
@@ -110,8 +121,10 @@ func paymentError(err error) error {
 		return platform.NewAppError("payment_not_found", "پرداخت پیدا نشد", 404, nil)
 	case errors.Is(err, ErrPaymentConflict):
 		return platform.NewAppError("payment_conflict", "وضعیت پرداخت امکان این عملیات را نمی‌دهد", 409, nil)
-	case errors.Is(err, ErrGatewayUnavailable), errors.Is(err, ErrGatewayUnknownOutcome):
-		return platform.NewAppError("payment_verification_pending", "نتیجه پرداخت در حال بررسی است", 503, nil)
+	case errors.Is(err, ErrGatewayUnavailable):
+		return platform.NewAppError("payment_provider_unavailable", "درگاه پرداخت در دسترس نیست", 503, err)
+	case errors.Is(err, ErrGatewayUnknownOutcome):
+		return platform.NewAppError("payment_verification_pending", "نتیجه پرداخت در حال بررسی است", 503, err)
 	default:
 		return platform.Unexpected(err)
 	}
