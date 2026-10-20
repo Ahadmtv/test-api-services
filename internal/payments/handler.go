@@ -43,16 +43,35 @@ func (h *Handler) rateLimited(next fiber.Handler) fiber.Handler {
 
 func (h *Handler) Create(c fiber.Ctx) error {
 	var input struct {
-		AmountIRR int64 `json:"amount_irr"`
+		Purpose   string `json:"purpose"`
+		AmountIRR *int64 `json:"amount_irr"`
+		BookingID *int64 `json:"booking_id"`
 	}
-	if err := c.Bind().JSON(&input); err != nil || input.AmountIRR < OfficialMinimumAmountIRR {
+	if err := c.Bind().JSON(&input); err != nil {
 		return invalidPaymentRequest()
 	}
 	key := strings.TrimSpace(c.Get("Idempotency-Key"))
 	if key == "" || len(key) > 128 {
 		return invalidPaymentRequest()
 	}
-	payment, redirectURL, err := h.service.Start(c.Context(), paymentPrincipal(c).UserID, input.AmountIRR, key, requestID(c))
+	userID := paymentPrincipal(c).UserID
+	var payment Payment
+	var redirectURL string
+	var err error
+	switch input.Purpose {
+	case "", PurposeWalletTopUp:
+		if input.AmountIRR == nil || *input.AmountIRR < OfficialMinimumAmountIRR || input.BookingID != nil {
+			return invalidPaymentRequest()
+		}
+		payment, redirectURL, err = h.service.Start(c.Context(), userID, *input.AmountIRR, key, requestID(c))
+	case PurposeBooking:
+		if input.AmountIRR != nil || input.BookingID == nil || *input.BookingID < 1 {
+			return invalidPaymentRequest()
+		}
+		payment, redirectURL, err = h.service.StartBooking(c.Context(), userID, *input.BookingID, key, requestID(c))
+	default:
+		return invalidPaymentRequest()
+	}
 	if err != nil {
 		return paymentError(err)
 	}

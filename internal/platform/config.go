@@ -38,6 +38,8 @@ type BookingConfig struct {
 	// CompletionDisputeWindow is the window the client has to dispute a
 	// completion request before it settles automatically.
 	CompletionDisputeWindow time.Duration
+	// PendingPaymentTTL is how long gateway-funded bookings reserve their slot.
+	PendingPaymentTTL time.Duration
 }
 
 type PayoutConfig struct {
@@ -110,6 +112,7 @@ const (
 	defaultAvailabilityNotice     = 2 * time.Hour
 	defaultAvailabilityHorizon    = 90 * 24 * time.Hour
 	defaultDisputeWindow          = 72 * time.Hour
+	defaultPendingPaymentTTL      = 15 * time.Minute
 	defaultPayoutMinAmountIRR     = int64(100_000)
 	minAuthAccessTokenSecretLen   = 32
 )
@@ -231,6 +234,10 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	cfg.Booking.CompletionDisputeWindow, err = parseAvailabilityDuration("BOOKING_COMPLETION_DISPUTE_WINDOW", defaultDisputeWindow, false)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Booking.PendingPaymentTTL, err = parseAvailabilityDuration("BOOKING_PENDING_PAYMENT_TTL", defaultPendingPaymentTTL, false)
 	if err != nil {
 		return nil, err
 	}

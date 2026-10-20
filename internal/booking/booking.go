@@ -32,6 +32,8 @@ type Booking struct {
 	PriceIRR              int64      `json:"price_irr"`
 	BufferMinutes         int        `json:"buffer_minutes"`
 	Status                string     `json:"status"`
+	PaymentMethod         string     `json:"payment_method"`
+	PaymentExpiresAt      *time.Time `json:"payment_expires_at"`
 	CompletionRequestedAt *time.Time `json:"completion_requested_at"`
 	CompletedAt           *time.Time `json:"completed_at"`
 	CreatedAt             time.Time  `json:"created_at"`
@@ -43,7 +45,26 @@ type Config struct {
 	// CompletionDisputeWindow is the time a client has to dispute a completion
 	// request before the booking settles automatically.
 	CompletionDisputeWindow time.Duration
-	Availability            scheduling.AvailabilityPolicy
+	// PendingPaymentTTL is how long a gateway-funded booking reserves its slot
+	// while the client completes payment.
+	PendingPaymentTTL time.Duration
+	Availability      scheduling.AvailabilityPolicy
+}
+
+const (
+	PaymentMethodNone     = "none"
+	PaymentMethodWallet   = "wallet"
+	PaymentMethodZarinpal = "zarinpal"
+
+	defaultPendingPaymentTTL = 15 * time.Minute
+)
+
+type GatewayPaymentConfirmation struct {
+	BookingID int64
+	ClientID  int64
+	PaymentID int64
+	AmountIRR int64
+	RequestID string
 }
 
 // DisputeResolution is the administrator decision for an open dispute.
@@ -59,6 +80,7 @@ const (
 type CreateInput struct {
 	ServiceID      int64
 	StartsAt       time.Time
+	PaymentMethod  string
 	IdempotencyKey string
 	RequestID      string
 }
@@ -89,21 +111,29 @@ func NewService(pool *pgxpool.Pool, providerProfiles *providers.Service, service
 }
 
 var (
-	ErrInvalidInput        = errors.New("invalid booking input")
-	ErrServiceUnavailable  = errors.New("service unavailable for booking")
-	ErrSlotUnavailable     = errors.New("requested booking slot unavailable")
-	ErrBookingNotFound     = errors.New("booking not found")
-	ErrForbidden           = errors.New("booking operation forbidden")
-	ErrInvalidTransition   = errors.New("invalid booking transition")
-	ErrCancellationClosed  = errors.New("booking cancellation window closed")
-	ErrDisputeWindowClosed = errors.New("booking dispute window closed")
-	ErrInvalidResolution   = errors.New("invalid dispute resolution")
-	ErrDisputeNotFound     = errors.New("booking dispute not found")
-	ErrIdempotencyConflict = errors.New("idempotency key payload conflict")
+	ErrInvalidInput          = errors.New("invalid booking input")
+	ErrServiceUnavailable    = errors.New("service unavailable for booking")
+	ErrSlotUnavailable       = errors.New("requested booking slot unavailable")
+	ErrBookingNotFound       = errors.New("booking not found")
+	ErrForbidden             = errors.New("booking operation forbidden")
+	ErrInvalidTransition     = errors.New("invalid booking transition")
+	ErrCancellationClosed    = errors.New("booking cancellation window closed")
+	ErrDisputeWindowClosed   = errors.New("booking dispute window closed")
+	ErrInvalidResolution     = errors.New("invalid dispute resolution")
+	ErrDisputeNotFound       = errors.New("booking dispute not found")
+	ErrIdempotencyConflict   = errors.New("idempotency key payload conflict")
+	ErrPaymentAmountMismatch = errors.New("payment amount does not match booking")
 )
 
 func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput, config Config) (*Booking, error) {
 	if clientID < 1 || input.ServiceID < 1 || input.StartsAt.IsZero() {
+		return nil, ErrInvalidInput
+	}
+	paymentMethod := input.PaymentMethod
+	if paymentMethod == "" {
+		paymentMethod = PaymentMethodWallet
+	}
+	if paymentMethod != PaymentMethodWallet && paymentMethod != PaymentMethodZarinpal {
 		return nil, ErrInvalidInput
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -112,7 +142,7 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 	}
 	defer tx.Rollback(ctx)
 
-	fingerprint := requestFingerprint(input.ServiceID, input.StartsAt)
+	fingerprint := requestFingerprint(input.ServiceID, input.StartsAt, paymentMethod)
 	if input.IdempotencyKey != "" {
 		var inserted int64
 		err := tx.QueryRow(ctx, `
@@ -138,8 +168,20 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 			if err := json.Unmarshal(result, &previous); err != nil {
 				return nil, fmt.Errorf("decode idempotent booking result: %w", err)
 			}
+			current, err := scanBooking(tx.QueryRow(ctx, `
+				SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
+					duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at,
+					completion_requested_at, completed_at, created_at, updated_at
+				FROM bookings WHERE id = $1
+			`, previous.ID))
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("refresh idempotent booking result: %w", err)
+			}
 			if err := tx.Commit(ctx); err != nil {
 				return nil, fmt.Errorf("commit idempotent booking read: %w", err)
+			}
+			if current != nil {
+				return current, nil
 			}
 			return &previous, nil
 		}
@@ -224,27 +266,37 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 		return nil, fmt.Errorf("set booking audit context: %w", err)
 	}
 
-	paymentMethod := "wallet"
+	status := "confirmed"
 	if service.PriceIRR == 0 {
-		paymentMethod = "none"
+		paymentMethod = PaymentMethodNone
+	}
+	var paymentExpiresAt *time.Time
+	if paymentMethod == PaymentMethodZarinpal && service.PriceIRR > 0 {
+		ttl := config.PendingPaymentTTL
+		if ttl <= 0 {
+			ttl = defaultPendingPaymentTTL
+		}
+		status = "pending_payment"
+		expiresAt := now.Add(ttl)
+		paymentExpiresAt = &expiresAt
 	}
 	item, err := scanBooking(tx.QueryRow(ctx, `
 		INSERT INTO bookings (
 			client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, payment_method
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'confirmed', $10)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 	`, clientID, providerID, service.ID, service.Name, startAt, endAt,
-		service.DurationMinutes, service.PriceIRR, service.BufferMinutes, paymentMethod))
+		service.DurationMinutes, service.PriceIRR, service.BufferMinutes, status, paymentMethod, paymentExpiresAt))
 	if err != nil {
 		if isOverlapViolation(err) {
 			return nil, ErrSlotUnavailable
 		}
 		return nil, fmt.Errorf("insert booking: %w", err)
 	}
-	if item.PriceIRR > 0 {
+	if item.PriceIRR > 0 && paymentMethod == PaymentMethodWallet {
 		if _, err := s.wallet.PlaceBookingHoldTx(ctx, tx, wallet.PlaceBookingHoldInput{BookingID: item.ID, CustomerID: clientID, ProviderID: providerID, AmountIRR: item.PriceIRR, RequestID: input.RequestID}); err != nil {
 			return nil, err
 		}
@@ -273,7 +325,7 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 func (s *Store) Get(ctx context.Context, actorID, bookingID int64) (*Booking, error) {
 	item, err := scanBooking(s.pool.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 AND (client_id = $2 OR provider_id = $2)
 	`, bookingID, actorID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -295,7 +347,7 @@ func (s *Store) ListProvider(ctx context.Context, providerID, after int64, limit
 
 func (s *Store) list(ctx context.Context, predicate string, actorID, after int64, limit int) ([]Booking, bool, error) {
 	query := `SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-		duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+		duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE ` + predicate + ` AND id > $2 ORDER BY id LIMIT $3`
 	rows, err := s.pool.Query(ctx, query, actorID, after, limit+1)
 	if err != nil {
@@ -445,7 +497,7 @@ func (s *Service) ResolveDispute(ctx context.Context, adminID, bookingID int64, 
 	}
 	current, err := scanBooking(tx.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 FOR UPDATE
 	`, bookingID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -495,7 +547,7 @@ func (s *Service) ResolveDispute(ctx context.Context, adminID, bookingID int64, 
 		UPDATE bookings SET status = $1, updated_at = now()
 		WHERE id = $2 AND status = 'disputed'
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 	`, target, bookingID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInvalidTransition
@@ -596,6 +648,187 @@ func (s *Service) ConfirmCompletion(ctx context.Context, clientID, bookingID int
 	}, s.finalizeCompletionEffect(ctx, bookingID, clientID, requestID))
 }
 
+// ConfirmGatewayPaymentTx captures verified gateway funds into the booking
+// hold and confirms the reservation atomically. It is called by the payment
+// callback inside the same transaction that marks the payment succeeded.
+func (s *Service) ConfirmGatewayPaymentTx(ctx context.Context, tx pgx.Tx, input GatewayPaymentConfirmation) error {
+	if input.BookingID < 1 || input.ClientID < 1 || input.PaymentID < 1 || input.AmountIRR < 1 {
+		return ErrInvalidInput
+	}
+	var clientID, providerID, priceIRR int64
+	var status, paymentMethod string
+	err := tx.QueryRow(ctx, `
+		SELECT client_id, provider_id, price_irr, status, payment_method
+		FROM bookings WHERE id = $1 FOR UPDATE
+	`, input.BookingID).Scan(&clientID, &providerID, &priceIRR, &status, &paymentMethod)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrBookingNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock booking for gateway payment: %w", err)
+	}
+	if clientID != input.ClientID {
+		return ErrBookingNotFound
+	}
+	if status == "confirmed" && paymentMethod == PaymentMethodZarinpal {
+		return nil
+	}
+	if status != "pending_payment" || paymentMethod != PaymentMethodZarinpal {
+		return ErrInvalidTransition
+	}
+	if priceIRR != input.AmountIRR {
+		return ErrPaymentAmountMismatch
+	}
+	if _, err := s.wallet.CaptureBookingPaymentTx(ctx, tx, wallet.CaptureBookingPaymentInput{
+		BookingID:  input.BookingID,
+		CustomerID: clientID,
+		ProviderID: providerID,
+		PaymentID:  input.PaymentID,
+		AmountIRR:  input.AmountIRR,
+		RequestID:  input.RequestID,
+	}); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT set_config('app.actor_type', 'system', true),
+		       set_config('app.actor_user_id', '', true),
+		       set_config('app.request_id', $1, true),
+		       set_config('app.transition_reason', 'gateway_payment_verified', true)
+	`, input.RequestID); err != nil {
+		return fmt.Errorf("set gateway payment audit context: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE bookings SET status = 'confirmed', updated_at = now()
+		WHERE id = $1 AND status = 'pending_payment'
+	`, input.BookingID)
+	if err != nil {
+		return fmt.Errorf("confirm gateway paid booking: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidTransition
+	}
+	return nil
+}
+
+// FailGatewayPaymentTx cancels a pending gateway booking after a verified
+// failed payment so the slot is released immediately.
+func (s *Service) FailGatewayPaymentTx(ctx context.Context, tx pgx.Tx, bookingID, clientID int64, requestID string) error {
+	var ownerID int64
+	var status string
+	if err := tx.QueryRow(ctx, `
+		SELECT client_id, status FROM bookings WHERE id = $1 FOR UPDATE
+	`, bookingID).Scan(&ownerID, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrBookingNotFound
+		}
+		return fmt.Errorf("lock booking for failed payment: %w", err)
+	}
+	if ownerID != clientID {
+		return ErrBookingNotFound
+	}
+	if status == "cancelled" || status == "expired" {
+		return nil
+	}
+	if status != "pending_payment" {
+		return ErrInvalidTransition
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT set_config('app.actor_type', 'system', true),
+		       set_config('app.actor_user_id', '', true),
+		       set_config('app.request_id', $1, true),
+		       set_config('app.transition_reason', 'gateway_payment_failed', true)
+	`, requestID); err != nil {
+		return fmt.Errorf("set failed payment audit context: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE bookings SET status = 'cancelled', updated_at = now()
+		WHERE id = $1 AND status = 'pending_payment'
+	`, bookingID)
+	if err != nil {
+		return fmt.Errorf("cancel failed payment booking: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidTransition
+	}
+	return nil
+}
+
+// ExpirePendingPayments releases slots of unpaid gateway bookings after their
+// deadline. A booking with an in-flight gateway attempt is left untouched so a
+// late success can never arrive after the slot was resold.
+func (s *Service) ExpirePendingPayments(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		return 0, ErrInvalidInput
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT b.id FROM bookings b
+		WHERE b.status = 'pending_payment'
+		  AND b.payment_expires_at <= now()
+		  AND NOT EXISTS (
+		      SELECT 1 FROM payment_attempts p
+		      WHERE p.booking_id = b.id
+		        AND p.status IN ('created', 'pending', 'verification_unknown')
+		  )
+		ORDER BY b.id
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("select expired pending payments: %w", err)
+	}
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	expired := 0
+	for _, id := range ids {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return expired, fmt.Errorf("begin pending payment expiry: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			SELECT set_config('app.actor_type', 'system', true),
+			       set_config('app.actor_user_id', '', true),
+			       set_config('app.request_id', 'pending-payment-expiry', true),
+			       set_config('app.transition_reason', 'payment_window_expired', true)
+		`); err != nil {
+			_ = tx.Rollback(ctx)
+			return expired, fmt.Errorf("set pending payment expiry context: %w", err)
+		}
+		result, err := tx.Exec(ctx, `
+			UPDATE bookings SET status = 'expired', updated_at = now()
+			WHERE id = $1 AND status = 'pending_payment' AND payment_expires_at <= now()
+			  AND NOT EXISTS (
+			      SELECT 1 FROM payment_attempts p
+			      WHERE p.booking_id = bookings.id
+			        AND p.status IN ('created', 'pending', 'verification_unknown')
+			  )
+		`, id)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return expired, fmt.Errorf("expire pending payment booking %d: %w", id, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return expired, fmt.Errorf("commit pending payment expiry: %w", err)
+		}
+		if result.RowsAffected() == 1 {
+			expired++
+		}
+	}
+	return expired, nil
+}
+
 // finalizeCompletionEffect settles the booking hold (no-op without a hold),
 // stamps completed_at, and leaves the status CAS to the caller's transition.
 func (s *Service) finalizeCompletionEffect(ctx context.Context, bookingID, actorID int64, requestID string) func(pgx.Tx) error {
@@ -633,7 +866,7 @@ func (s *Service) transition(ctx context.Context, actorID, bookingID int64, targ
 	}
 	current, err := scanBooking(tx.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 FOR UPDATE
 	`, bookingID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -666,7 +899,7 @@ func (s *Service) transition(ctx context.Context, actorID, bookingID int64, targ
 		UPDATE bookings SET status = $1, updated_at = now()
 		WHERE id = $2 AND status = $3
 		RETURNING id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 	`, target, bookingID, current.Status))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrInvalidTransition
@@ -684,7 +917,7 @@ func listOccupiedTx(ctx context.Context, tx pgx.Tx, providerID int64, startAt, e
 	rows, err := tx.Query(ctx, `
 		SELECT starts_at, ends_at + buffer_minutes * INTERVAL '1 minute'
 		FROM bookings
-		WHERE provider_id = $1 AND status IN ('confirmed', 'in_progress', 'completion_pending', 'disputed')
+		WHERE provider_id = $1 AND status IN ('pending_payment', 'confirmed', 'in_progress', 'completion_pending', 'disputed')
 		  AND starts_at < $3 AND ends_at + buffer_minutes * INTERVAL '1 minute' > $2
 		ORDER BY starts_at
 	`, providerID, startAt.UTC(), endAt.UTC())
@@ -709,19 +942,23 @@ func scanBooking(row pgx.Row) (*Booking, error) {
 	var item Booking
 	err := row.Scan(&item.ID, &item.ClientID, &item.ProviderID, &item.ServiceID, &item.ServiceName,
 		&item.StartsAt, &item.EndsAt, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes,
-		&item.Status, &item.CompletionRequestedAt, &item.CompletedAt, &item.CreatedAt, &item.UpdatedAt)
+		&item.Status, &item.PaymentMethod, &item.PaymentExpiresAt, &item.CompletionRequestedAt, &item.CompletedAt, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	item.StartsAt = item.StartsAt.UTC()
 	item.EndsAt = item.EndsAt.UTC()
+	if item.PaymentExpiresAt != nil {
+		expiresAt := item.PaymentExpiresAt.UTC()
+		item.PaymentExpiresAt = &expiresAt
+	}
 	item.CreatedAt = item.CreatedAt.UTC()
 	item.UpdatedAt = item.UpdatedAt.UTC()
 	return &item, nil
 }
 
-func requestFingerprint(serviceID int64, startsAt time.Time) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s", serviceID, startsAt.UTC().Format(time.RFC3339Nano))))
+func requestFingerprint(serviceID int64, startsAt time.Time, paymentMethod string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", serviceID, startsAt.UTC().Format(time.RFC3339Nano), paymentMethod)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -796,7 +1033,7 @@ func (s *Service) expireDisputeWindow(ctx context.Context, bookingID int64, wind
 	}
 	current, err := scanBooking(tx.QueryRow(ctx, `
 		SELECT id, client_id, provider_id, service_id, service_name, starts_at, ends_at,
-			duration_minutes, price_irr, buffer_minutes, status, completion_requested_at, completed_at, created_at, updated_at
+			duration_minutes, price_irr, buffer_minutes, status, payment_method, payment_expires_at, completion_requested_at, completed_at, created_at, updated_at
 		FROM bookings WHERE id = $1 FOR UPDATE
 	`, bookingID))
 	if errors.Is(err, pgx.ErrNoRows) {

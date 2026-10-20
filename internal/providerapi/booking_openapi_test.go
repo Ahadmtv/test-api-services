@@ -17,7 +17,7 @@ func TestOpenAPIContractIncludesBookingOperations(t *testing.T) {
 		"/api/v1/provider/bookings/{bookingID}/decline:",
 		"pending_provider_acceptance",
 		"BOOKING_PENDING_TTL",
-		"expires_at",
+		"\n        expires_at:",
 	} {
 		if strings.Contains(spec, obsolete) {
 			t.Errorf("OpenAPI contract still contains obsolete approval field %q", obsolete)

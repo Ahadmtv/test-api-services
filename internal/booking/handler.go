@@ -55,8 +55,9 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 }
 
 type createRequest struct {
-	ServiceID int64  `json:"service_id"`
-	StartsAt  string `json:"starts_at"`
+	ServiceID     int64  `json:"service_id"`
+	StartsAt      string `json:"starts_at"`
+	PaymentMethod string `json:"payment_method"`
 }
 
 type disputeRequest struct {
@@ -91,7 +92,8 @@ func (h *Handler) Create(c fiber.Ctx) error {
 	}
 	requestID, _ := c.Locals(platform.RequestIDKey).(string)
 	item, err := h.service.Create(c.Context(), principal(c).UserID, CreateInput{
-		ServiceID: req.ServiceID, StartsAt: startsAt, IdempotencyKey: key, RequestID: requestID,
+		ServiceID: req.ServiceID, StartsAt: startsAt, PaymentMethod: strings.TrimSpace(req.PaymentMethod),
+		IdempotencyKey: key, RequestID: requestID,
 	}, h.config)
 	if err != nil {
 		return bookingError(err)
@@ -323,6 +325,8 @@ func bookingError(err error) error {
 		return platform.NewAppError("idempotency_conflict", "کلید تکرار برای درخواست متفاوت استفاده شده است", 409, nil)
 	case errors.Is(err, ErrInvalidTransition):
 		return platform.NewAppError("invalid_booking_transition", "این تغییر وضعیت رزرو مجاز نیست", 409, nil)
+	case errors.Is(err, ErrPaymentAmountMismatch):
+		return platform.NewAppError("payment_amount_mismatch", "مبلغ پرداخت با مبلغ رزرو هم‌خوانی ندارد", 409, nil)
 	case errors.Is(err, ErrCancellationClosed):
 		return platform.NewAppError("cancellation_window_closed", "مهلت لغو رزرو پایان یافته است", 409, nil)
 	case errors.Is(err, ErrDisputeWindowClosed):

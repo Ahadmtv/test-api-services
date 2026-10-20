@@ -49,7 +49,7 @@ func (o *OccupancyStore) ListOccupied(ctx context.Context, providerID int64, sta
 	rows, err := o.pool.Query(ctx, `
 		SELECT starts_at, ends_at + buffer_minutes * INTERVAL '1 minute'
 		FROM bookings
-		WHERE provider_id = $1 AND status IN ('confirmed', 'in_progress')
+		WHERE provider_id = $1 AND status IN ('pending_payment', 'confirmed', 'in_progress', 'completion_pending', 'disputed')
 		  AND starts_at < $3 AND ends_at + buffer_minutes * INTERVAL '1 minute' > $2
 		ORDER BY starts_at
 	`, providerID, startAt.UTC(), endAt.UTC())
@@ -363,7 +363,7 @@ func activeBookingsFitHours(ctx context.Context, tx pgx.Tx, providerID int64, ti
 		SELECT starts_at, ends_at + buffer_minutes * INTERVAL '1 minute'
 		FROM bookings
 		WHERE provider_id = $1
-		  AND status IN ('confirmed', 'in_progress')
+		  AND status IN ('pending_payment', 'confirmed', 'in_progress', 'completion_pending', 'disputed')
 		  AND ends_at + buffer_minutes * INTERVAL '1 minute' > now()
 	`, providerID)
 	if err != nil {
@@ -414,7 +414,7 @@ func ensureNoActiveBookingConflict(ctx context.Context, tx pgx.Tx, providerID in
 		SELECT EXISTS (
 			SELECT 1 FROM bookings
 			WHERE provider_id = $1
-			  AND status IN ('confirmed', 'in_progress')
+			  AND status IN ('pending_payment', 'confirmed', 'in_progress', 'completion_pending', 'disputed')
 			  AND starts_at < $3
 			  AND ends_at + buffer_minutes * INTERVAL '1 minute' > $2
 		)

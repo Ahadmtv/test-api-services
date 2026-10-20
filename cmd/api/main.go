@@ -83,6 +83,15 @@ func run(ctx context.Context, args []string) error {
 			logger.Info("dispute window settlement completed", "settled", settled)
 			return nil
 		}
+		if args[0] == "bookings-expire-payments" {
+			bookingSvc := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg))
+			expired, err := bookingSvc.ExpirePendingPayments(ctx, 100)
+			if err != nil {
+				return fmt.Errorf("expire unpaid bookings: %w", err)
+			}
+			logger.Info("pending booking payment expiry completed", "expired", expired)
+			return nil
+		}
 		if args[0] == "payouts-reconcile" {
 			if err := payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR).Verify(ctx); err != nil {
 				return fmt.Errorf("payout reconciliation: %w", err)
@@ -126,12 +135,12 @@ func run(ctx context.Context, args []string) error {
 	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	walletService := wallet.NewService(db.Pool())
 	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
 	paymentGateway, err := payments.NewZarinpalGateway(cfg.Payments.MerchantID, payments.ZarinpalEnvironment(cfg.Payments.Environment))
 	if err != nil {
 		return fmt.Errorf("payment gateway configuration: %w", err)
 	}
-	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL), rateLimiter, cfg.Payments.ReturnURL).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
-	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
+	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL, bookingService), rateLimiter, cfg.Payments.ReturnURL).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	bookingHandler := booking.NewHandler(bookingService, bookingConfigFrom(cfg))
 	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
 	payouts.NewHandler(payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
@@ -222,6 +231,7 @@ func bookingConfigFrom(cfg *platform.Config) booking.Config {
 	return booking.Config{
 		CancellationCutoff:      cfg.Booking.CancellationCutoff,
 		CompletionDisputeWindow: cfg.Booking.CompletionDisputeWindow,
+		PendingPaymentTTL:       cfg.Booking.PendingPaymentTTL,
 		Availability: scheduling.AvailabilityPolicy{
 			SlotIncrement:  cfg.Availability.SlotIncrement,
 			MinimumNotice:  cfg.Availability.MinimumNotice,

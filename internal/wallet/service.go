@@ -147,6 +147,9 @@ func (s *Service) Reconcile(ctx context.Context) error {
 func (s *Service) PlaceBookingHoldTx(ctx context.Context, tx pgx.Tx, input PlaceBookingHoldInput) (*BookingHold, error) {
 	return PlaceBookingHoldTx(ctx, tx, input)
 }
+func (s *Service) CaptureBookingPaymentTx(ctx context.Context, tx pgx.Tx, input CaptureBookingPaymentInput) (*BookingHold, error) {
+	return CaptureBookingPaymentTx(ctx, tx, input)
+}
 func (s *Service) ReleaseBookingHoldTx(ctx context.Context, tx pgx.Tx, bookingID, actorID int64, requestID string) error {
 	return ReleaseBookingHoldTx(ctx, tx, bookingID, actorID, requestID)
 }

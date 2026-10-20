@@ -41,6 +41,16 @@ go run ./cmd/api
 
 API در `http://localhost:8080` در دسترس است.
 
+اجرای API داخل Docker نیز ممکن است؛ پیش از بالا آمدن سرویس، مهاجرت‌ها را روی همان پایگاه‌داده اجرا کنید:
+
+```bash
+docker compose up -d db
+docker compose run --rm api migrate
+docker compose up -d api
+```
+
+مهاجرت اجرانشده باعث خطای داخلی ایجاد رزرو می‌شود؛ پس از هر به‌روزرسانی کد، `migrate` را دوباره اجرا کنید.
+
 ### ۲) بدون Docker (PostgreSQL محلی)
 
 پایگاه داده `bookings` و کاربر `booker` را بسازید، سپس:
@@ -172,9 +182,9 @@ curl -X POST http://localhost:8080/api/v1/provider/bookings/1/start \\
   -H 'Authorization: Bearer <provider_access_token>'
 ```
 
-رزرو موفق بلافاصله با وضعیت `confirmed` ثبت می‌شود و برای تأیید دستی یا TTL پذیرش provider منتظر نمی‌ماند؛ برای خدمت با مبلغ مثبت، ایجاد رزرو تنها با موجودی قابل‌استفاده کافی ممکن است و مبلغ خدمت را قفل می‌کند. خدمت رایگان بدون قفل ثبت می‌شود. گذارهای فعال طبق ADR 0013 عبارت‌اند از: `confirmed → cancelled` با لغو مشتری پیش از مهلت `BOOKING_CANCELLATION_CUTOFF`، `confirmed → cancelled` با لغو ارائه‌دهنده مالک پیش از آغاز، `confirmed → in_progress` با آغاز خدمت، `in_progress → completion_pending` با درخواست تکمیل، `completion_pending → completed` با تأیید مشتری یا `disputed` با ثبت اختلاف، و `disputed → completed | cancelled` با حل اختلاف مدیر. قفل وجه فقط هنگام لغو آزاد و هنگام تأیید تکمیل/حل اختلاف/انقضای پنجره به درآمد داخلی ارائه‌دهنده و کمیسیون تسویه می‌شود.
+رزرو با روش پیش‌فرض `wallet` بلافاصله با وضعیت `confirmed` ثبت می‌شود و برای تأیید دستی یا TTL پذیرش provider منتظر نمی‌ماند؛ برای خدمت با مبلغ مثبت، موجودی قابل‌استفاده کافی لازم است و مبلغ خدمت قفل می‌شود. خدمت رایگان بدون قفل ثبت می‌شود. با `payment_method=zarinpal` رزرو در وضعیت `pending_payment` با `payment_expires_at` ساخته می‌شود، بازه را نگه می‌دارد و فقط پس از Verify موفق سرور `confirmed` می‌شود؛ مبلغ در این مسیر مستقیماً به قفل رزرو می‌رود و موجودی قابل‌استفاده کیف پول را افزایش نمی‌دهد (ADR 0016). گذارهای فعال طبق ADR 0013 عبارت‌اند از: `confirmed → cancelled` با لغو مشتری پیش از مهلت `BOOKING_CANCELLATION_CUTOFF`، `confirmed → cancelled` با لغو ارائه‌دهنده مالک پیش از آغاز، `confirmed → in_progress` با آغاز خدمت، `in_progress → completion_pending` با درخواست تکمیل، `completion_pending → completed` با تأیید مشتری یا `disputed` با ثبت اختلاف، و `disputed → completed | cancelled` با حل اختلاف مدیر. قفل وجه فقط هنگام لغو آزاد و هنگام تأیید تکمیل/حل اختلاف/انقضای پنجره به درآمد داخلی ارائه‌دهنده و کمیسیون تسویه می‌شود.
 
-`GET /api/v1/wallet` مانده قابل‌استفاده، قفل‌شده و درآمد داخلی ارائه‌دهنده را برمی‌گرداند؛ `GET /api/v1/wallet/transactions` تاریخچه صفحه‌بندی‌شده اسناد دفترکل است. مشتری احرازشده با `POST /api/v1/payments/zarinpal`، مبلغ `amount_irr` و `Idempotency-Key`، پرداخت جدید ایجاد می‌کند؛ پاسخ شامل `redirect_url` و شناسه محلی پرداخت است. وضعیت متعلق به مشتری با `GET /api/v1/payments/{paymentID}` خوانده می‌شود. callback عمومی `GET /api/v1/payments/zarinpal/callback` فقط آغازگر بررسی server-to-server است و پارامتر مرورگر مدرک پرداخت نیست. تنها نتیجه تأییدشده با authority و مبلغ مطابق، کیف پول را در همان تراکنش وضعیت `succeeded` شارژ می‌کند. تکرار callback سند ledger دوم نمی‌سازد.
+`GET /api/v1/wallet` مانده قابل‌استفاده، قفل‌شده و درآمد داخلی ارائه‌دهنده را برمی‌گرداند؛ `GET /api/v1/wallet/transactions` تاریخچه صفحه‌بندی‌شده اسناد دفترکل است. مشتری احرازشده با `POST /api/v1/payments/zarinpal` و `Idempotency-Key` پرداخت جدید ایجاد می‌کند. `purpose=wallet_topup` (پیش‌فرض) مبلغ `amount_irr` را برای شارژ کیف پول می‌گیرد؛ `purpose=booking` فقط `booking_id` را می‌گیرد و مبلغ را از snapshot سرور می‌خواند. پاسخ شامل `redirect_url` و شناسه محلی پرداخت است. شکست تأییدشده پرداخت رزرو را لغو می‌کند و `go run ./cmd/api bookings-expire-payments` رزروهای `pending_payment` بدون تلاش پرداخت فعال را پس از مهلت `BOOKING_PENDING_PAYMENT_TTL` منقضی می‌کند. وضعیت متعلق به مشتری با `GET /api/v1/payments/{paymentID}` خوانده می‌شود. callback عمومی `GET /api/v1/payments/zarinpal/callback` فقط آغازگر بررسی server-to-server است و پارامتر مرورگر مدرک پرداخت نیست. تنها نتیجه تأییدشده با authority و مبلغ مطابق، کیف پول را در همان تراکنش وضعیت `succeeded` شارژ می‌کند. تکرار callback سند ledger دوم نمی‌سازد.
 
 بازپرداخت فقط با نقش مدیر، برای رزرو تکمیل‌شده و با `Idempotency-Key` در `POST /api/v1/admin/bookings/{bookingID}/refund` ممکن است. ثبت بازپرداخت، سند settlement را معکوس می‌کند و مبلغ قفل‌شده را در همان تراکنش به موجودی قابل‌استفاده مشتری برمی‌گرداند؛ این عمل بازپرداخت بانکی/درگاهی نیست.
 

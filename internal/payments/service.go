@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"test-api/internal/booking"
 	"test-api/internal/wallet"
 )
 
@@ -25,9 +26,16 @@ var (
 	ErrPaymentMismatch  = errors.New("verified payment does not match local payment")
 )
 
+const (
+	PurposeWalletTopUp = "wallet_topup"
+	PurposeBooking     = "booking"
+)
+
 type Payment struct {
 	ID                 int64      `json:"id"`
 	AmountIRR          int64      `json:"amount_irr"`
+	Purpose            string     `json:"purpose"`
+	BookingID          *int64     `json:"booking_id,omitempty"`
 	Status             string     `json:"status"`
 	Authority          *string    `json:"authority,omitempty"`
 	GatewayReferenceID *string    `json:"gateway_reference_id,omitempty"`
@@ -36,62 +44,143 @@ type Payment struct {
 	SucceededAt        *time.Time `json:"succeeded_at,omitempty"`
 }
 
-type Service struct {
-	pool        *pgxpool.Pool
-	wallet      *wallet.Service
-	gateway     Gateway
-	callbackURL string
+type BookingPaymentConfirmer interface {
+	ConfirmGatewayPaymentTx(ctx context.Context, tx pgx.Tx, input booking.GatewayPaymentConfirmation) error
+	FailGatewayPaymentTx(ctx context.Context, tx pgx.Tx, bookingID, clientID int64, requestID string) error
 }
 
-func NewService(pool *pgxpool.Pool, walletService *wallet.Service, gateway Gateway, callbackURL string) *Service {
-	return &Service{pool: pool, wallet: walletService, gateway: gateway, callbackURL: callbackURL}
+type Service struct {
+	pool           *pgxpool.Pool
+	wallet         *wallet.Service
+	gateway        Gateway
+	callbackURL    string
+	bookingPayment BookingPaymentConfirmer
+}
+
+func NewService(pool *pgxpool.Pool, walletService *wallet.Service, gateway Gateway, callbackURL string, bookingPayment ...BookingPaymentConfirmer) *Service {
+	service := &Service{pool: pool, wallet: walletService, gateway: gateway, callbackURL: callbackURL}
+	if len(bookingPayment) > 0 {
+		service.bookingPayment = bookingPayment[0]
+	}
+	return service
 }
 
 func (s *Service) Start(ctx context.Context, userID, amountIRR int64, idempotencyKey, requestID string) (Payment, string, error) {
+	return s.start(ctx, userID, amountIRR, PurposeWalletTopUp, 0, idempotencyKey, requestID)
+}
+
+func (s *Service) StartBooking(ctx context.Context, userID, bookingID int64, idempotencyKey, requestID string) (Payment, string, error) {
+	if bookingID < 1 {
+		return Payment{}, "", ErrInvalidInput
+	}
+	return s.start(ctx, userID, 0, PurposeBooking, bookingID, idempotencyKey, requestID)
+}
+
+func (s *Service) start(ctx context.Context, userID, amountIRR int64, purpose string, bookingID int64, idempotencyKey, requestID string) (Payment, string, error) {
 	if readiness, ok := s.gateway.(interface{ Configured() bool }); ok && !readiness.Configured() {
 		return Payment{}, "", ErrGatewayUnavailable
 	}
-	if userID < 1 || amountIRR < OfficialMinimumAmountIRR || len(idempotencyKey) == 0 || len(idempotencyKey) > 128 || requestID == "" {
+	if userID < 1 || len(idempotencyKey) == 0 || len(idempotencyKey) > 128 || requestID == "" {
+		return Payment{}, "", ErrInvalidInput
+	}
+	if purpose != PurposeWalletTopUp && purpose != PurposeBooking {
+		return Payment{}, "", ErrInvalidInput
+	}
+	if purpose == PurposeWalletTopUp && amountIRR < OfficialMinimumAmountIRR {
 		return Payment{}, "", ErrInvalidInput
 	}
 	parsedCallback, err := url.ParseRequestURI(s.callbackURL)
 	if err != nil || parsedCallback.Host == "" || (parsedCallback.Scheme != "http" && parsedCallback.Scheme != "https") {
 		return Payment{}, "", ErrGatewayUnavailable
 	}
-	fingerprint := paymentFingerprint(amountIRR, s.callbackURL)
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Payment{}, "", fmt.Errorf("begin payment creation: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var payment Payment
-	var inserted bool
-	err = tx.QueryRow(ctx, `
-		INSERT INTO payment_attempts (client_id, idempotency_key, request_fingerprint, amount_irr, callback_url, status, request_id, request_started_at)
-		VALUES ($1, $2, $3, $4, $5, 'created', $6, now())
-		ON CONFLICT (client_id, idempotency_key) DO NOTHING
-		RETURNING id, amount_irr, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
-	`, userID, idempotencyKey, fingerprint, amountIRR, s.callbackURL, requestID).Scan(
-		&payment.ID, &payment.AmountIRR, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt,
-	)
-	if err == nil {
-		inserted = true
-	} else if errors.Is(err, pgx.ErrNoRows) {
-		var storedFingerprint string
+	var existing *Payment
+	if purpose == PurposeBooking {
+		var ownerID, priceIRR int64
+		var status, method string
+		var expiresAt time.Time
 		if err := tx.QueryRow(ctx, `
-			SELECT id, request_fingerprint, amount_irr, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
-			FROM payment_attempts WHERE client_id = $1 AND idempotency_key = $2 FOR UPDATE
-		`, userID, idempotencyKey).Scan(
-			&payment.ID, &storedFingerprint, &payment.AmountIRR, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt,
-		); err != nil {
-			return Payment{}, "", fmt.Errorf("read idempotent payment: %w", err)
+			SELECT client_id, price_irr, status, payment_method, payment_expires_at
+			FROM bookings WHERE id = $1 FOR UPDATE
+		`, bookingID).Scan(&ownerID, &priceIRR, &status, &method, &expiresAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Payment{}, "", ErrPaymentNotFound
+			}
+			return Payment{}, "", fmt.Errorf("lock booking for payment: %w", err)
 		}
-		if storedFingerprint != fingerprint {
+		if ownerID != userID || status != "pending_payment" || method != "zarinpal" {
 			return Payment{}, "", ErrPaymentConflict
 		}
+		if priceIRR < OfficialMinimumAmountIRR || !expiresAt.After(time.Now().UTC()) {
+			return Payment{}, "", ErrPaymentConflict
+		}
+		amountIRR = priceIRR
+
+		var found Payment
+		err = tx.QueryRow(ctx, `
+			SELECT id, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+			FROM payment_attempts
+			WHERE booking_id = $1 AND purpose = 'booking'
+			  AND status IN ('created', 'pending', 'verification_unknown')
+			FOR UPDATE
+		`, bookingID).Scan(
+			&found.ID, &found.AmountIRR, &found.Purpose, &found.BookingID, &found.Status,
+			&found.Authority, &found.GatewayReferenceID, &found.CreatedAt, &found.UpdatedAt, &found.SucceededAt,
+		)
+		if err == nil {
+			existing = &found
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return Payment{}, "", fmt.Errorf("read active booking payment: %w", err)
+		}
+	}
+
+	var payment Payment
+	var inserted bool
+	if existing == nil {
+		fingerprint := paymentFingerprint(purpose, bookingID, amountIRR, s.callbackURL)
+		var bookingValue any
+		if bookingID > 0 {
+			bookingValue = bookingID
+		}
+		err = tx.QueryRow(ctx, `
+			INSERT INTO payment_attempts (
+				client_id, idempotency_key, request_fingerprint, amount_irr, purpose, booking_id,
+				callback_url, status, request_id, request_started_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'created', $8, now())
+			ON CONFLICT (client_id, idempotency_key) DO NOTHING
+			RETURNING id, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+		`, userID, idempotencyKey, fingerprint, amountIRR, purpose, bookingValue, s.callbackURL, requestID).Scan(
+			&payment.ID, &payment.AmountIRR, &payment.Purpose, &payment.BookingID, &payment.Status,
+			&payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt,
+		)
+		if err == nil {
+			inserted = true
+		} else if errors.Is(err, pgx.ErrNoRows) {
+			var storedFingerprint string
+			if err := tx.QueryRow(ctx, `
+				SELECT id, request_fingerprint, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+				FROM payment_attempts WHERE client_id = $1 AND idempotency_key = $2 FOR UPDATE
+			`, userID, idempotencyKey).Scan(
+				&payment.ID, &storedFingerprint, &payment.AmountIRR, &payment.Purpose, &payment.BookingID,
+				&payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt,
+			); err != nil {
+				return Payment{}, "", fmt.Errorf("read idempotent payment: %w", err)
+			}
+			if storedFingerprint != fingerprint {
+				return Payment{}, "", ErrPaymentConflict
+			}
+		} else {
+			return Payment{}, "", fmt.Errorf("create payment record: %w", err)
+		}
 	} else {
-		return Payment{}, "", fmt.Errorf("create payment record: %w", err)
+		payment = *existing
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, "", fmt.Errorf("commit payment record: %w", err)
@@ -106,10 +195,14 @@ func (s *Service) Start(ctx context.Context, userID, amountIRR int64, idempotenc
 			payment, err = s.getByID(ctx, userID, payment.ID)
 			return payment, "", err
 		}
+		description := fmt.Sprintf("Wallet top-up %d", payment.ID)
+		if purpose == PurposeBooking {
+			description = fmt.Sprintf("Booking %d payment %d", bookingID, payment.ID)
+		}
 		created, gatewayErr := s.gateway.Create(ctx, CreateRequest{
 			AmountIRR:   amountIRR,
 			CallbackURL: s.callbackURL,
-			Description: fmt.Sprintf("Wallet top-up %d", payment.ID),
+			Description: description,
 		})
 		if gatewayErr != nil {
 			status, code := "verification_unknown", "request_outcome_unknown"
@@ -118,6 +211,11 @@ func (s *Service) Start(ctx context.Context, userID, amountIRR int64, idempotenc
 			}
 			if err := s.markRequestResult(payment.ID, status, code, ""); err != nil {
 				return Payment{}, "", err
+			}
+			if purpose == PurposeBooking && status == "failed" {
+				if err := s.cancelUnpaidBooking(ctx, bookingID, userID, requestID); err != nil {
+					return Payment{}, "", err
+				}
 			}
 			payment, err = s.getByID(ctx, userID, payment.ID)
 			return payment, "", err
@@ -265,19 +363,52 @@ func (s *Service) UnresolvedReport(ctx context.Context) (UnresolvedReport, error
 	return report, nil
 }
 
+func (s *Service) cancelUnpaidBooking(ctx context.Context, bookingID, userID int64, requestID string) error {
+	if s.bookingPayment == nil {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin failed booking payment cancellation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := s.bookingPayment.FailGatewayPaymentTx(ctx, tx, bookingID, userID, requestID); err != nil {
+		return fmt.Errorf("cancel booking after gateway rejection: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Service) finishVerification(ctx context.Context, paymentID int64, authority string, result Verification, requestID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin payment verification result: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	var purpose string
+	var bookingID *int64
+	if err := tx.QueryRow(ctx, `
+		SELECT purpose, booking_id FROM payment_attempts WHERE id = $1
+	`, paymentID).Scan(&purpose, &bookingID); err != nil {
+		return fmt.Errorf("read payment purpose: %w", err)
+	}
+	if purpose == PurposeBooking && bookingID != nil {
+		var lockedID int64
+		if err := tx.QueryRow(ctx, `SELECT id FROM bookings WHERE id = $1 FOR UPDATE`, *bookingID).Scan(&lockedID); err != nil {
+			return fmt.Errorf("lock booking for payment result: %w", err)
+		}
+	}
+
 	var payment Payment
 	var userID int64
 	var gatewayReference *string
 	if err := tx.QueryRow(ctx, `
-		SELECT id, client_id, amount_irr, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+		SELECT id, client_id, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
 		FROM payment_attempts WHERE id = $1 FOR UPDATE
-	`, paymentID).Scan(&payment.ID, &userID, &payment.AmountIRR, &payment.Status, &payment.Authority, &gatewayReference, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt); err != nil {
+	`, paymentID).Scan(
+		&payment.ID, &userID, &payment.AmountIRR, &payment.Purpose, &payment.BookingID, &payment.Status,
+		&payment.Authority, &gatewayReference, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt,
+	); err != nil {
 		return fmt.Errorf("lock payment verification result: %w", err)
 	}
 	if payment.Status == "succeeded" || payment.Status == "failed" {
@@ -287,7 +418,29 @@ func (s *Service) finishVerification(ctx context.Context, paymentID int64, autho
 		return ErrPaymentConflict
 	}
 	if result.Approved {
-		if err := s.wallet.CreditPaymentTx(ctx, tx, userID, paymentID, payment.AmountIRR, requestID); err != nil {
+		ledgerReference := fmt.Sprintf("payment:%d:funding", paymentID)
+		if payment.Purpose == PurposeBooking {
+			if s.bookingPayment == nil || payment.BookingID == nil {
+				return ErrPaymentConflict
+			}
+			err := s.bookingPayment.ConfirmGatewayPaymentTx(ctx, tx, booking.GatewayPaymentConfirmation{
+				BookingID: *payment.BookingID,
+				ClientID:  userID,
+				PaymentID: paymentID,
+				AmountIRR: payment.AmountIRR,
+				RequestID: requestID,
+			})
+			if errors.Is(err, booking.ErrPaymentAmountMismatch) {
+				return ErrPaymentMismatch
+			}
+			if errors.Is(err, booking.ErrInvalidTransition) || errors.Is(err, booking.ErrBookingNotFound) {
+				return ErrPaymentConflict
+			}
+			if err != nil {
+				return fmt.Errorf("confirm booking payment: %w", err)
+			}
+			ledgerReference = fmt.Sprintf("payment:%d:capture", paymentID)
+		} else if err := s.wallet.CreditPaymentTx(ctx, tx, userID, paymentID, payment.AmountIRR, requestID); err != nil {
 			return fmt.Errorf("credit verified wallet payment: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -296,7 +449,7 @@ func (s *Service) finishVerification(ctx context.Context, paymentID int64, autho
 					SELECT id FROM ledger_transactions WHERE reference = $3
 				), succeeded_at = now(), updated_at = now()
 			WHERE id = $4
-		`, result.ReferenceID, result.GatewayCode, fmt.Sprintf("payment:%d:funding", paymentID), paymentID); err != nil {
+		`, result.ReferenceID, result.GatewayCode, ledgerReference, paymentID); err != nil {
 			return fmt.Errorf("mark payment succeeded: %w", err)
 		}
 	} else {
@@ -305,6 +458,14 @@ func (s *Service) finishVerification(ctx context.Context, paymentID int64, autho
 			WHERE id = $2
 		`, result.GatewayCode, paymentID); err != nil {
 			return fmt.Errorf("mark payment failed: %w", err)
+		}
+		if payment.Purpose == PurposeBooking && payment.BookingID != nil {
+			if s.bookingPayment == nil {
+				return ErrPaymentConflict
+			}
+			if err := s.bookingPayment.FailGatewayPaymentTx(ctx, tx, *payment.BookingID, userID, requestID); err != nil {
+				return fmt.Errorf("release failed booking payment: %w", err)
+			}
 		}
 	}
 	return tx.Commit(ctx)
@@ -344,9 +505,9 @@ func (s *Service) markRequestResult(paymentID int64, status, gatewayCode, author
 func (s *Service) getByID(ctx context.Context, userID, paymentID int64) (Payment, error) {
 	var payment Payment
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, amount_irr, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+		SELECT id, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
 		FROM payment_attempts WHERE client_id = $1 AND id = $2
-	`, userID, paymentID).Scan(&payment.ID, &payment.AmountIRR, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt)
+	`, userID, paymentID).Scan(&payment.ID, &payment.AmountIRR, &payment.Purpose, &payment.BookingID, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Payment{}, ErrPaymentNotFound
 	}
@@ -359,9 +520,9 @@ func (s *Service) getByID(ctx context.Context, userID, paymentID int64) (Payment
 func (s *Service) getByAuthority(ctx context.Context, authority string) (Payment, error) {
 	var payment Payment
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, amount_irr, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
+		SELECT id, amount_irr, purpose, booking_id, status, authority, gateway_reference_id, created_at, updated_at, succeeded_at
 		FROM payment_attempts WHERE authority = $1
-	`, authority).Scan(&payment.ID, &payment.AmountIRR, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt)
+	`, authority).Scan(&payment.ID, &payment.AmountIRR, &payment.Purpose, &payment.BookingID, &payment.Status, &payment.Authority, &payment.GatewayReferenceID, &payment.CreatedAt, &payment.UpdatedAt, &payment.SucceededAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Payment{}, ErrPaymentNotFound
 	}
@@ -371,8 +532,8 @@ func (s *Service) getByAuthority(ctx context.Context, authority string) (Payment
 	return payment, nil
 }
 
-func paymentFingerprint(amountIRR int64, callbackURL string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("zarinpal|%d|%s", amountIRR, callbackURL)))
+func paymentFingerprint(purpose string, bookingID, amountIRR int64, callbackURL string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("zarinpal|%s|%d|%d|%s", purpose, bookingID, amountIRR, callbackURL)))
 	return hex.EncodeToString(sum[:])
 }
 

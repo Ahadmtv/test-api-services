@@ -69,6 +69,12 @@
 
 معیار پذیرش مرتبط: آزمون PostgreSQL واقعی برای چرخه تکمیل (تأیید/اختلاف/حل هر دو سمت/انقضای پنجره با اجرای idempotent)، لغو ارائه‌دهنده، رقابت هم‌زمان درخواست تسویه (فقط یک requested)، بازپخش idempotency، کمبود موجودی، گذارهای نامعتبر، تراز دفترکل پس از هر سناریو و تطبیق. این موارد در `internal/booking/stage08_integration_test.go` و `internal/payouts/integration_test.go` روی PostgreSQL اجرا شده‌اند.
 
+## مرحله 10 — پرداخت مستقیم درگاه برای رزرو
+
+طبق ADR 0016 پیاده‌سازی شده است: رزرو با `payment_method=zarinpal` در وضعیت `pending_payment` با مهلت `BOOKING_PENDING_PAYMENT_TTL` ساخته می‌شود و بازه را نگه می‌دارد. `POST /api/v1/payments/zarinpal` با `purpose=booking` فقط `booking_id` را می‌پذیرد، مالکیت و مبلغ snapshot را از سرور می‌خواند و تلاش تکراری فعال را بازپخش می‌کند. Verify موفق در یک تراکنش رزرو را `confirmed` و سند `funding_clearing → customer_held` را با reference `payment:<id>:capture` ثبت می‌کند؛ مانده قابل‌استفاده کیف پول تغییر نمی‌کند. شکست تأییدشده پرداخت رزرو را لغو می‌کند و `bookings-expire-payments` رزروهای گذشته از مهلت را در نبود تلاش فعال منقضی می‌کند.
+
+معیار پذیرش مرتبط: آزمون PostgreSQL واقعی برای موفقیت بدون افزایش موجودی کیف پول، شکست و لغو، رد شدن Create درگاه، انقضای بدون تلاش فعال و عدم انقضای تلاش فعال، callback تکراری بدون قفل دوم، تطبیق مبلغ و مالکیت، و تراز دفترکل. این موارد در `internal/payments/booking_payment_integration_test.go` و `handler_integration_test.go` اجرا می‌شوند. پرداخت دیرهنگام/رها‌شده در `verification_unknown` همچنان به گزارش unresolved و تطبیق عملیاتی وابسته است؛ بازپرداخت بیرونی درگاه خارج از دامنه باقی می‌ماند.
+
 ## پرسش‌های مسدودکننده پیش از پیاده‌سازی قابلیت مربوط
 
 1. روش ورود و تأمین‌کننده OTP، سیاست تأیید هویت و نقش مدیر چیست؟

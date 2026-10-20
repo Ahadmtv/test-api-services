@@ -37,6 +37,15 @@ type PlaceBookingHoldInput struct {
 	RequestID  string
 }
 
+type CaptureBookingPaymentInput struct {
+	BookingID  int64
+	CustomerID int64
+	ProviderID int64
+	PaymentID  int64
+	AmountIRR  int64
+	RequestID  string
+}
+
 type commissionPolicy struct {
 	version int
 	rateBPS int
@@ -88,6 +97,62 @@ func PlaceBookingHoldTx(ctx context.Context, tx pgx.Tx, input PlaceBookingHoldIn
 
 	if err := auditTx(ctx, tx, input.CustomerID, "wallet.hold.placed", "wallet_hold", hold.ID, input.RequestID, map[string]any{
 		"booking_id":            input.BookingID,
+		"amount_irr":            input.AmountIRR,
+		"ledger_transaction_id": transactionID,
+	}); err != nil {
+		return nil, err
+	}
+	return &hold, nil
+}
+
+// CaptureBookingPaymentTx places a booking hold directly from verified gateway
+// funds. The funding clearing account is debited and the customer's held
+// balance is credited, so the payment never becomes spendable wallet money.
+func CaptureBookingPaymentTx(ctx context.Context, tx pgx.Tx, input CaptureBookingPaymentInput) (*BookingHold, error) {
+	if input.BookingID < 1 || input.CustomerID < 1 || input.ProviderID < 1 || input.PaymentID < 1 {
+		return nil, ErrInvalidInput
+	}
+	if err := validateAmount(input.AmountIRR); err != nil {
+		return nil, err
+	}
+	policy, err := activeCommissionPolicyTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	transactionID, err := postTx(ctx, tx, posting{
+		reference: fmt.Sprintf("payment:%d:capture", input.PaymentID),
+		kind:      txHoldPlace,
+		actorID:   input.CustomerID,
+		requestID: input.RequestID,
+		entries: []entry{
+			{account: accountRef{kind: kindFundingClearing}, side: sideDebit, amount: input.AmountIRR},
+			{account: accountRef{ownerID: input.CustomerID, kind: kindCustomerHeld}, side: sideCredit, amount: input.AmountIRR},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var hold BookingHold
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO wallet_holds (
+			booking_id, customer_id, provider_id, amount_irr,
+			commission_policy_version, commission_rate_bps, status, place_transaction_id
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+		RETURNING id, booking_id, customer_id, provider_id, amount_irr,
+			commission_policy_version, commission_rate_bps, status
+	`, input.BookingID, input.CustomerID, input.ProviderID, input.AmountIRR,
+		policy.version, policy.rateBPS, transactionID).Scan(
+		&hold.ID, &hold.BookingID, &hold.CustomerID, &hold.ProviderID, &hold.AmountIRR,
+		&hold.CommissionPolicyVersion, &hold.CommissionRateBPS, &hold.Status,
+	); err != nil {
+		return nil, fmt.Errorf("insert gateway payment hold: %w", err)
+	}
+
+	if err := auditTx(ctx, tx, input.CustomerID, "wallet.hold.captured", "wallet_hold", hold.ID, input.RequestID, map[string]any{
+		"booking_id":            input.BookingID,
+		"payment_id":            input.PaymentID,
 		"amount_irr":            input.AmountIRR,
 		"ledger_transaction_id": transactionID,
 	}); err != nil {

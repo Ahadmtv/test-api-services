@@ -491,8 +491,8 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
   /api/v1/payments/zarinpal:
     post:
-      summary: ایجاد درخواست شارژ کیف پول با Zarinpal
-      description: فقط مشتری احرازشده می‌تواند پرداخت صحیح IRR با حداقل 10000 ریال آغاز کند. درخواست بیرونی بدون retry خودکار ارسال می‌شود؛ callback proof نیست و فقط Verify server-to-server می‌تواند کیف پول را شارژ کند.
+      summary: ایجاد پرداخت Zarinpal برای شارژ کیف پول یا رزرو
+      description: فقط مشتری احرازشده می‌تواند پرداخت را آغاز کند. با purpose=wallet_topup مبلغ صحیح IRR حداقل 10000 ریال لازم است و فقط پس از Verify سرور به مانده قابل‌استفاده اضافه می‌شود. با purpose=booking فقط booking_id ارسال می‌شود؛ مالکیت و مبلغ از سرور خوانده می‌شود و در صورت موفقیت مبلغ مستقیماً به قفل رزرو می‌رود، نه کیف پول قابل‌استفاده. callback proof نیست و موفقیت فقط با Verify سرور و گذار اتمی رزرو تعیین می‌شود.
       security:
         - bearerAuth: []
       parameters:
@@ -596,7 +596,7 @@ paths:
   /api/v1/bookings:
     post:
       summary: ایجاد رزرو
-      description: مشتری فقط شناسه خدمت و زمان آغاز را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. رزرو در همان تراکنش با وضعیت confirmed و payment_method=wallet ایجاد و مبلغ صحیح ریال از مانده قابل‌استفاده به قفل کیف پول منتقل می‌شود.
+      description: مشتری شناسه خدمت، زمان آغاز و به‌صورت اختیاری روش پرداخت را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. پیش‌فرض payment_method=wallet است و رزرو در همان تراکنش confirmed می‌شود و مبلغ از مانده قابل‌استفاده به قفل می‌رود. با payment_method=zarinpal رزرو pending_payment با payment_expires_at ساخته می‌شود و فقط پس از Verify موفق به confirmed می‌رسد؛ در این مسیر مانده قابل‌استفاده کیف پول تغییر نمی‌کند.
       security:
         - bearerAuth: []
       parameters:
@@ -616,7 +616,7 @@ paths:
               $ref: '#/components/schemas/BookingCreateInput'
       responses:
         '201':
-          description: رزرو confirmed یا پاسخ بازپخش‌شده
+          description: رزرو confirmed، رزرو pending_payment در انتظار پرداخت، یا پاسخ بازپخش‌شده
           content:
             application/json:
               schema:
@@ -1289,15 +1289,24 @@ components:
     PaymentCreateInput:
       type: object
       additionalProperties: false
-      required: [amount_irr]
       properties:
-        amount_irr: { type: integer, format: int64, minimum: 10000, description: مبلغ صحیح ریال؛ Zarinpal آن را به ریال دریافت می‌کند }
+        purpose:
+          type: string
+          enum: [wallet_topup, booking]
+          description: هدف پرداخت؛ wallet_topup شارژ کیف پول (پیش‌فرض) و booking پرداخت مستقیم رزرو است
+        amount_irr: { type: integer, format: int64, minimum: 10000, description: فقط برای wallet_topup؛ مبلغ صحیح ریال که Zarinpal دریافت می‌کند }
+        booking_id: { type: integer, format: int64, minimum: 1, description: فقط برای booking؛ مبلغ از snapshot معتبر سرور خوانده می‌شود و نباید ارسال شود }
+      oneOf:
+        - required: [amount_irr]
+        - required: [booking_id]
     Payment:
       type: object
-      required: [id, amount_irr, status, created_at, updated_at]
+      required: [id, amount_irr, purpose, status, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
-        amount_irr: { type: integer, format: int64, minimum: 10000 }
+        amount_irr: { type: integer, format: int64, minimum: 0 }
+        purpose: { type: string, enum: [wallet_topup, booking] }
+        booking_id: { type: [integer, 'null'], format: int64 }
         status: { type: string, enum: [created, pending, succeeded, failed, verification_unknown] }
         authority: { type: [string, 'null'] }
         gateway_reference_id: { type: [string, 'null'] }
@@ -1317,9 +1326,14 @@ components:
       properties:
         service_id: { type: integer, format: int64, minimum: 1 }
         starts_at: { type: string, format: date-time, description: لحظه آغاز RFC 3339 با offset }
+        payment_method:
+          type: string
+          enum: [wallet, zarinpal]
+          default: wallet
+          description: wallet برای پرداخت از مانده کیف پول؛ zarinpal برای پرداخت مستقیم درگاه و وضعیت pending_payment تا تأیید سرور
     Booking:
       type: object
-      required: [id, client_id, provider_id, service_id, service_name, starts_at, ends_at, duration_minutes, price_irr, buffer_minutes, status, created_at, updated_at]
+      required: [id, client_id, provider_id, service_id, service_name, starts_at, ends_at, duration_minutes, price_irr, buffer_minutes, status, payment_method, created_at, updated_at]
       properties:
         id: { type: integer, format: int64 }
         client_id: { type: integer, format: int64 }
@@ -1333,7 +1347,14 @@ components:
         buffer_minutes: { type: integer, minimum: 0, maximum: 1440 }
         status:
           type: string
-          enum: [confirmed, in_progress, completion_pending, disputed, completed, cancelled, expired]
+          enum: [pending_payment, confirmed, in_progress, completion_pending, disputed, completed, cancelled, expired]
+        payment_method:
+          type: string
+          enum: [none, wallet, zarinpal]
+        payment_expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: مهلت پرداخت رزروهای pending_payment؛ پس از آن رزرو فقط در نبود تلاش پرداخت فعال منقضی می‌شود
         completion_requested_at:
           type: [string, 'null']
           format: date-time
