@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestOpenAPI3ContractIncludesBeautyServiceCategory(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI contract: %v", err)
+	}
+	spec := string(data)
+	for _, needle := range []string{
+		"    ServiceCategory:\n",
+		"        - haircut\n",
+		"        - other\n",
+		"name: category",
+	} {
+		if !strings.Contains(spec, needle) {
+			t.Errorf("OpenAPI contract is missing beauty category marker %q", needle)
+		}
+	}
+}
+
 func TestOpenAPI3ContractIncludesStage03Operations(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi.yaml")
 	if err != nil {

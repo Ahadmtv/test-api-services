@@ -395,7 +395,7 @@ func TestFullBusinessWorkflow(t *testing.T) {
 	})
 
 	status, payload, raw := helperDo(t, e.app, http.MethodPost, "/api/v1/provider/services", e.providerToken,
-		`{"name":"E2E Service","duration_minutes":30,"price_irr":25000,"is_active":true}`, "")
+		`{"name":"E2E Beauty Service","category":"haircut","duration_minutes":30,"price_irr":25000,"is_active":true}`, "")
 	expectStatus(t, status, http.StatusCreated, "create service", raw)
 	serviceID := number(t, payload, "id", "create service")
 

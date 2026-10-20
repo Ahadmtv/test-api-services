@@ -1,6 +1,6 @@
-# SAMA — سامانه رزرو خدمات
+# SAMA — سامانه رزرو خدمات زیبایی
 
-سامانه رزرو خدمات با نقش‌های مشتری، ارائه‌دهنده خدمت و مدیر.
+سامانه رزرو خدمات زیبایی و مراقبت شخصی با نقش‌های مشتری، ارائه‌دهنده خدمت و مدیر.
 مرحله‌های 02 و 03 شامل احراز هویت، حساب‌های کاربری و مجوزها، نمایه ارائه‌دهنده، کاتالوگ خدمات و برنامه هفتگی/مرخصی هستند. مرحله 06 چرخه رزرو با تأیید فوری، قفل کیف پول، لغو، آغاز خدمت را اضافه می‌کند؛ شارژ کیف پول از مسیر Zarinpal در Sandbox طبق مرز provider مرحله 07 انجام می‌شود. مرحله 08 (طبق ADR 0013) workflow تکمیل مشتری‌محور را اضافه می‌کند: ارائه‌دهنده درخواست تکمیل می‌دهد (`request-completion`)، مشتری تأیید یا اختلاف ثبت می‌کند، مدیر اختلاف را حل می‌کند و رزروهای خارج پنجره با فرمان عملیاتی `bookings-settle-expired` تسویه می‌شوند. ارائه‌دهنده همچنین می‌تواند با `POST /api/v1/provider/payouts` درخواست تسویه داخلی بدهد که درآمد او را در دفترکل رزرو می‌کند؛ گذارهای پرداخت دستی مدیر با ارجاع انتقال بیرونی ثبت می‌شوند (تسویه بانکی واقعی در دامنه نیست).
 طبق ADR 0010، رزرو همچنان فوری `confirmed` است، اما مبلغ صحیح ریال آن در همان تراکنش از کیف پول مشتری قفل می‌شود؛ لغو قفل را آزاد و تأیید تکمیل آن را تسویه می‌کند.
 
@@ -105,13 +105,13 @@ curl -X GET http://localhost:8080/api/v1/me \
 curl -X PUT http://localhost:8080/api/v1/provider/profile \
   -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
-  -d '{"display_name":"مرکز خدمات","description":"توضیح","time_zone":"Asia/Tehran","is_active":true}'
+  -d '{"display_name":"سالن زیبایی نمونه","description":"توضیح","time_zone":"Asia/Tehran","is_active":true}'
 
-# ثبت خدمت با مبلغ صحیح ریال
+# ثبت خدمت با دسته‌بندی زیبایی و مبلغ صحیح ریال
 curl -X POST http://localhost:8080/api/v1/provider/services \
   -H 'Authorization: Bearer <access_token>' \
   -H 'Content-Type: application/json' \
-  -d '{"name":"مشاوره","description":"جلسه","duration_minutes":45,"price_irr":2500000,"buffer_minutes":10,"is_active":true}'
+  -d '{"name":"کوتاهی مو","description":"کوتاهی و براشینگ","category":"haircut","duration_minutes":45,"price_irr":2500000,"buffer_minutes":10,"is_active":true}'
 
 # دو بازه در یک روز؛ روز ISO-8601 است (دوشنبه 1 تا یکشنبه 7)
 curl -X PUT http://localhost:8080/api/v1/provider/working-hours \

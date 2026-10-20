@@ -3,6 +3,7 @@ package providerapi
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -154,6 +155,7 @@ func (h *Handler) SetVerificationStatus(c fiber.Ctx) error {
 type serviceRequest struct {
 	Name            string `json:"name"`
 	Description     string `json:"description"`
+	Category        string `json:"category"`
 	DurationMinutes int    `json:"duration_minutes"`
 	PriceIRR        *int64 `json:"price_irr"`
 	BufferMinutes   int    `json:"buffer_minutes"`
@@ -170,7 +172,7 @@ func (h *Handler) CreateService(c fiber.Ctx) error {
 		active = *req.IsActive
 	}
 	item, err := h.services.Create(c.Context(), principal(c).UserID, catalog.CreateInput{
-		Name: req.Name, Description: req.Description, DurationMinutes: req.DurationMinutes,
+		Name: req.Name, Description: req.Description, Category: req.Category, DurationMinutes: req.DurationMinutes,
 		PriceIRR: *req.PriceIRR, BufferMinutes: req.BufferMinutes, IsActive: active,
 	})
 	if err != nil {
@@ -196,7 +198,11 @@ func (h *Handler) ListPublicServices(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	items, more, err := h.services.ListPublic(c.Context(), after, limit)
+	category := strings.TrimSpace(c.Query("category"))
+	if category != "" && !catalog.IsValidCategory(category) {
+		return invalidRequest()
+	}
+	items, more, err := h.services.ListPublic(c.Context(), category, after, limit)
 	if err != nil {
 		return platform.Unexpected(err)
 	}
@@ -218,6 +224,7 @@ func (h *Handler) GetPublicService(c fiber.Ctx) error {
 type servicePatch struct {
 	Name            *string `json:"name"`
 	Description     *string `json:"description"`
+	Category        *string `json:"category"`
 	DurationMinutes *int    `json:"duration_minutes"`
 	PriceIRR        *int64  `json:"price_irr"`
 	BufferMinutes   *int    `json:"buffer_minutes"`
@@ -233,11 +240,11 @@ func (h *Handler) UpdateService(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return invalidRequest()
 	}
-	if req.Name == nil && req.Description == nil && req.DurationMinutes == nil && req.PriceIRR == nil && req.BufferMinutes == nil && req.IsActive == nil {
+	if req.Name == nil && req.Description == nil && req.Category == nil && req.DurationMinutes == nil && req.PriceIRR == nil && req.BufferMinutes == nil && req.IsActive == nil {
 		return invalidRequest()
 	}
 	item, err := h.services.Update(c.Context(), principal(c).UserID, id, catalog.UpdateInput{
-		Name: req.Name, Description: req.Description, DurationMinutes: req.DurationMinutes,
+		Name: req.Name, Description: req.Description, Category: req.Category, DurationMinutes: req.DurationMinutes,
 		PriceIRR: req.PriceIRR, BufferMinutes: req.BufferMinutes, IsActive: req.IsActive,
 	})
 	if err != nil {

@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: API سامانه رزرو خدمات
+  title: API سامانه رزرو خدمات زیبایی
   version: 1.0.0
-  description: قرارداد API نسخه یک سامانه رزرو خدمات
+  description: قرارداد API نسخه یک سامانه رزرو خدمات زیبایی و مراقبت شخصی
 servers:
   - url: /
 paths:
@@ -112,10 +112,16 @@ paths:
   /api/v1/services:
     get:
       summary: فهرست خدمات فعال و تأییدشده
-      description: فهرست عمومی خدمات فعال متعلق به نمایه‌های فعال و تأییدشده را با صفحه‌بندی cursor-based برمی‌گرداند.
+      description: فهرست عمومی خدمات زیبایی فعال متعلق به نمایه‌های فعال و تأییدشده را با صفحه‌بندی cursor-based برمی‌گرداند. با پارامتر `category` می‌توان نتیجه را به یک دسته‌بندی خدمت زیبایی محدود کرد.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
+        - name: category
+          in: query
+          required: false
+          description: دسته‌بندی خدمت زیبایی؛ مقدار نامعتبر با خطای ۴۰۰ رد می‌شود.
+          schema:
+            $ref: '#/components/schemas/ServiceCategory'
       responses:
         '200':
           description: صفحه خدمات
@@ -1173,14 +1179,33 @@ components:
           description: نام منطقه زمانی معتبر IANA
           default: Asia/Tehran
         is_active: { type: boolean }
+    ServiceCategory:
+      type: string
+      description: دسته‌بندی خدمات زیبایی و مراقبت شخصی. مقدار `other` برای خدمات بازبینی‌نشده یا قدیمی نگه داشته می‌شود و نباید به‌عنوان یک دسته‌بندی تبلیغاتی جدید استفاده شود.
+      enum:
+        - haircut
+        - hair-color
+        - hair-care
+        - makeup
+        - eyebrow-lash
+        - nails
+        - skin-care
+        - waxing
+        - massage
+        - spa
+        - bridal
+        - barbering
+        - other
     Service:
       type: object
-      required: [id, provider_id, name, description, duration_minutes, price_irr, buffer_minutes, is_active]
+      required: [id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
         name: { type: string }
         description: { type: string }
+        category:
+          $ref: '#/components/schemas/ServiceCategory'
         duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
         price_irr: { type: integer, format: int64, minimum: 0, description: مبلغ صحیح ریال }
         buffer_minutes: { type: integer, minimum: 0, maximum: 1440 }
@@ -1191,6 +1216,10 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 160 }
         description: { type: string }
+        category:
+          allOf:
+            - $ref: '#/components/schemas/ServiceCategory'
+          description: در صورت ارسال‌نشدن، خدمت با دسته‌بندی `other` ثبت می‌شود.
         duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
         price_irr: { type: integer, format: int64, minimum: 0 }
         buffer_minutes: { type: integer, minimum: 0, maximum: 1440, default: 0 }
@@ -1201,6 +1230,8 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 160 }
         description: { type: string }
+        category:
+          $ref: '#/components/schemas/ServiceCategory'
         duration_minutes: { type: integer, minimum: 1, maximum: 1440 }
         price_irr: { type: integer, format: int64, minimum: 0 }
         buffer_minutes: { type: integer, minimum: 0, maximum: 1440 }

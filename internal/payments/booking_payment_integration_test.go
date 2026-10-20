@@ -136,7 +136,7 @@ func TestBookingPaymentCapturesWithoutCreditingWallet(t *testing.T) {
 		t.Fatalf("repeat callback: %v", err)
 	}
 	var holds int
-	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM booking_holds WHERE booking_id = $1 AND status = 'active'`, created.ID).Scan(&holds); err != nil {
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM wallet_holds WHERE booking_id = $1 AND status = 'active'`, created.ID).Scan(&holds); err != nil {
 		t.Fatal(err)
 	}
 	if holds != 1 {
@@ -177,7 +177,7 @@ func TestFailedBookingPaymentCancelsPendingBooking(t *testing.T) {
 		t.Fatalf("booking status=%s; want cancelled", status)
 	}
 	var holds int
-	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM booking_holds WHERE booking_id = $1`, created.ID).Scan(&holds); err != nil {
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM wallet_holds WHERE booking_id = $1`, created.ID).Scan(&holds); err != nil {
 		t.Fatal(err)
 	}
 	if holds != 0 {

@@ -80,10 +80,10 @@ func TestStage03APIIntegration(t *testing.T) {
 		}
 	}
 	var ownerServiceID, otherServiceID int64
-	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, duration_minutes, price_irr) VALUES ($1, 'Owned service', 30, 10000) RETURNING id`, ownerID).Scan(&ownerServiceID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, category, duration_minutes, price_irr) VALUES ($1, 'Owned service', 'haircut', 30, 10000) RETURNING id`, ownerID).Scan(&ownerServiceID); err != nil {
 		t.Fatalf("create owner service: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, duration_minutes, price_irr) VALUES ($1, 'Other service', 45, 20000) RETURNING id`, otherID).Scan(&otherServiceID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, category, duration_minutes, price_irr) VALUES ($1, 'Other service', 'nails', 45, 20000) RETURNING id`, otherID).Scan(&otherServiceID); err != nil {
 		t.Fatalf("create other service: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -157,7 +157,7 @@ func TestStage03APIIntegration(t *testing.T) {
 	resp.Body.Close()
 
 	otherToken := integrationToken(t, otherID)
-	resp = doRequest(t, app, http.MethodPatch, "/api/v1/provider/services/"+jsonNumber(otherServiceID), otherToken, `{"name":"Updated service","duration_minutes":60,"price_irr":25000,"buffer_minutes":10}`)
+	resp = doRequest(t, app, http.MethodPatch, "/api/v1/provider/services/"+jsonNumber(otherServiceID), otherToken, `{"name":"Updated service","category":"makeup","duration_minutes":60,"price_irr":25000,"buffer_minutes":10}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("owner update status = %d", resp.StatusCode)
 	}
@@ -166,9 +166,29 @@ func TestStage03APIIntegration(t *testing.T) {
 		t.Fatalf("decode updated service: %v", err)
 	}
 	resp.Body.Close()
-	if updated.ID != otherServiceID || updated.Name != "Updated service" || updated.DurationMinutes != 60 || updated.PriceIRR != 25000 || updated.BufferMinutes != 10 {
+	if updated.ID != otherServiceID || updated.Name != "Updated service" || updated.Category != catalog.CategoryMakeup || updated.DurationMinutes != 60 || updated.PriceIRR != 25000 || updated.BufferMinutes != 10 {
 		t.Fatalf("unexpected updated service: %+v", updated)
 	}
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/services?category=makeup", "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("filter public services by category status = %d", resp.StatusCode)
+	}
+	var filtered struct {
+		Items []catalog.ServiceItem `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&filtered); err != nil {
+		t.Fatalf("decode filtered services: %v", err)
+	}
+	resp.Body.Close()
+	if len(filtered.Items) != 1 || filtered.Items[0].ID != otherServiceID {
+		t.Fatalf("filtered services = %+v, want only service %d", filtered.Items, otherServiceID)
+	}
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/services?category=dermatology", "", "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("medical category filter status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
 	var snapshotName, snapshotCurrency string
 	var snapshotDuration, snapshotBuffer int
 	var snapshotPrice int64
