@@ -794,12 +794,15 @@ paths:
       parameters:
         - $ref: '#/components/parameters/BookingID'
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required: [reason]
+              additionalProperties: false
               properties:
-                reason: { type: string, maxLength: 500 }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
       responses:
         '200':
           description: رزرو در وضعیت اختلاف
