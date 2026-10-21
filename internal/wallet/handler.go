@@ -15,9 +15,9 @@ type Handler struct{ service *Service }
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
-func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers ...auth.PrincipalResolver) {
 	group := app.Group("/api/v1/wallet")
-	group.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("client", "provider"))
+	group.Use(auth.Authenticator(accessTokenSecret, resolvers...), auth.RequireRoles("client", "provider"))
 	group.Get("/", h.Balance)
 	group.Get("/transactions", h.Transactions)
 }

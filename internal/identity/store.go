@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -31,6 +32,23 @@ type Store interface {
 	RevokeRefreshToken(ctx context.Context, tx pgx.Tx, tokenHash string, replacedBy string) (int64, error)
 	RevokeAllUserTokens(ctx context.Context, tx pgx.Tx, userID int64) error
 	BeginTx(ctx context.Context) (pgx.Tx, error)
+	ListAdminUsers(ctx context.Context, after int64, limit int, query, role string) ([]AdminUser, bool, error)
+	GetUserForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserRecord, error)
+	SetRole(ctx context.Context, tx pgx.Tx, userID int64, role string, granted bool) (bool, error)
+	LockAdminRoleChanges(ctx context.Context, tx pgx.Tx) error
+	CountOtherActiveAdmins(ctx context.Context, tx pgx.Tx, userID int64) (int, error)
+	InsertAuditEvent(ctx context.Context, tx pgx.Tx, actorID, targetID int64, action, requestID string, metadata map[string]any) error
+}
+
+// AdminUser is the administrative view of an account.
+type AdminUser struct {
+	ID          int64     `json:"id"`
+	Email       string    `json:"email"`
+	Phone       *string   `json:"phone"`
+	DisplayName string    `json:"display_name"`
+	Roles       []string  `json:"roles"`
+	IsActive    bool      `json:"is_active"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // User is a public user profile returned to callers.
@@ -50,6 +68,8 @@ type UserRecord struct {
 	PasswordHash string
 	IsActive     bool
 	Roles        []string
+	DisplayName  string
+	CreatedAt    time.Time
 }
 
 // RefreshRow represents a refresh token record.
@@ -277,4 +297,152 @@ func (s *pgxStore) RevokeAllUserTokens(ctx context.Context, tx pgx.Tx, userID in
 		WHERE user_id = $1 AND revoked_at IS NULL
 	`, userID)
 	return err
+}
+
+func (s *pgxStore) ListAdminUsers(ctx context.Context, after int64, limit int, query, role string) ([]AdminUser, bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id, u.email, u.phone, u.is_active, u.created_at,
+		       COALESCE(p.display_name, ''),
+		       COALESCE(array_agg(ur.role ORDER BY ur.role) FILTER (WHERE ur.role IS NOT NULL), '{}'::text[])
+		FROM users u
+		LEFT JOIN provider_profiles p ON p.provider_id = u.id
+		LEFT JOIN user_roles ur ON ur.user_id = u.id
+		WHERE ($1 = 0 OR u.id > $1)
+		  AND ($2 = '' OR u.email ILIKE '%' || $2 || '%'
+		       OR COALESCE(u.phone, '') ILIKE '%' || $2 || '%'
+		       OR COALESCE(p.display_name, '') ILIKE '%' || $2 || '%')
+		  AND ($3 = '' OR EXISTS (
+		       SELECT 1 FROM user_roles filtered WHERE filtered.user_id = u.id AND filtered.role = $3
+		  ))
+		GROUP BY u.id, u.email, u.phone, u.is_active, u.created_at, p.display_name
+		ORDER BY u.id
+		LIMIT $4
+	`, after, query, role, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("list admin users: %w", err)
+	}
+	defer rows.Close()
+
+	users := make([]AdminUser, 0, limit+1)
+	for rows.Next() {
+		var (
+			user  AdminUser
+			phone sql.NullString
+		)
+		if err := rows.Scan(&user.ID, &user.Email, &phone, &user.IsActive, &user.CreatedAt, &user.DisplayName, &user.Roles); err != nil {
+			return nil, false, fmt.Errorf("scan admin user: %w", err)
+		}
+		if phone.Valid {
+			user.Phone = &phone.String
+		}
+		if user.Roles == nil {
+			user.Roles = []string{}
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate admin users: %w", err)
+	}
+
+	hasMore := len(users) > limit
+	if hasMore {
+		users = users[:limit]
+	}
+	return users, hasMore, nil
+}
+
+func (s *pgxStore) GetUserForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserRecord, error) {
+	var (
+		record   UserRecord
+		phone    sql.NullString
+		password string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT u.id, u.email, u.phone, u.password_hash, u.is_active, u.created_at,
+		       COALESCE((SELECT p.display_name FROM provider_profiles p WHERE p.provider_id = u.id), '')
+		FROM users u WHERE u.id = $1 FOR UPDATE
+	`, userID).Scan(&record.ID, &record.Email, &phone, &password, &record.IsActive, &record.CreatedAt, &record.DisplayName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("lock user: %w", err)
+	}
+	if phone.Valid {
+		record.Phone = &phone.String
+	}
+	record.PasswordHash = password
+
+	rows, err := tx.Query(ctx, `SELECT role FROM user_roles WHERE user_id = $1 ORDER BY role`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("load locked user roles: %w", err)
+	}
+	defer rows.Close()
+	record.Roles = []string{}
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil, fmt.Errorf("scan locked user role: %w", err)
+		}
+		record.Roles = append(record.Roles, role)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate locked user roles: %w", err)
+	}
+	return &record, nil
+}
+
+func (s *pgxStore) SetRole(ctx context.Context, tx pgx.Tx, userID int64, role string, granted bool) (bool, error) {
+	if granted {
+		result, err := tx.Exec(ctx, `
+			INSERT INTO user_roles (user_id, role) VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, userID, role)
+		if err != nil {
+			return false, fmt.Errorf("grant role: %w", err)
+		}
+		return result.RowsAffected() == 1, nil
+	}
+	result, err := tx.Exec(ctx, `DELETE FROM user_roles WHERE user_id = $1 AND role = $2`, userID, role)
+	if err != nil {
+		return false, fmt.Errorf("revoke role: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+func (s *pgxStore) LockAdminRoleChanges(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('beautyra.admin.roles'))`)
+	if err != nil {
+		return fmt.Errorf("lock admin role changes: %w", err)
+	}
+	return nil
+}
+
+func (s *pgxStore) CountOtherActiveAdmins(ctx context.Context, tx pgx.Tx, userID int64) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM user_roles ur
+		JOIN users u ON u.id = ur.user_id
+		WHERE ur.role = 'admin' AND ur.user_id <> $1 AND u.is_active
+	`, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active admins: %w", err)
+	}
+	return count, nil
+}
+
+func (s *pgxStore) InsertAuditEvent(ctx context.Context, tx pgx.Tx, actorID, targetID int64, action, requestID string, metadata map[string]any) error {
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("encode audit metadata: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO audit_events (actor_user_id, action, target_type, target_id, request_id, metadata)
+		VALUES ($1, $2, 'user', $3, $4, $5::jsonb)
+	`, actorID, action, targetID, requestID, string(payload))
+	if err != nil {
+		return fmt.Errorf("insert audit event: %w", err)
+	}
+	return nil
 }

@@ -29,13 +29,13 @@ func NewHandler(profiles *providers.Service, services *catalog.Store, schedule *
 	return &Handler{profiles: profiles, services: services, schedule: schedule, occupancy: occupancy, policy: policy}
 }
 
-func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers ...auth.PrincipalResolver) {
 	app.Get("/api/v1/providers/:providerID/availability", h.GetAvailability)
 	app.Get("/api/v1/services", h.ListPublicServices)
 	app.Get("/api/v1/services/:serviceID", h.GetPublicService)
 
 	provider := app.Group("/api/v1/provider")
-	provider.Use(authenticator(accessTokenSecret))
+	provider.Use(authenticator(accessTokenSecret, resolvers...))
 	provider.Use(requireProviderRole())
 	provider.Get("/profile", h.GetProfile)
 	provider.Put("/profile", h.PutProfile)
@@ -49,7 +49,7 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	provider.Get("/time-off", h.ListTimeOff)
 
 	admin := app.Group("/api/v1/admin")
-	admin.Use(authenticator(accessTokenSecret))
+	admin.Use(authenticator(accessTokenSecret, resolvers...))
 	admin.Use(auth.RequireRoles("admin"))
 	admin.Patch("/providers/:providerID/verification", h.SetVerificationStatus)
 }
@@ -383,8 +383,8 @@ func parseRFC3339(value string) (time.Time, error) {
 	return time.Parse(time.RFC3339, value)
 }
 
-func authenticator(secret string) fiber.Handler {
-	return auth.Authenticator(secret)
+func authenticator(secret string, resolvers ...auth.PrincipalResolver) fiber.Handler {
+	return auth.Authenticator(secret, resolvers...)
 }
 
 func requireProviderRole() fiber.Handler {

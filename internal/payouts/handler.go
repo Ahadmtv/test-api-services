@@ -23,15 +23,15 @@ type Handler struct {
 
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
-func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers ...auth.PrincipalResolver) {
 	providerGroup := app.Group("/api/v1/provider/payouts")
-	providerGroup.Use(auth.Authenticator(accessTokenSecret))
+	providerGroup.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	providerGroup.Use(auth.RequireRoles("provider"))
 	providerGroup.Post("/", h.Create)
 	providerGroup.Get("/", h.List)
 
 	adminGroup := app.Group("/api/v1/admin/payouts")
-	adminGroup.Use(auth.Authenticator(accessTokenSecret))
+	adminGroup.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	adminGroup.Use(auth.RequireRoles("admin"))
 	adminGroup.Post("/:payoutID/approve", adminAction(h.service.Approve))
 	adminGroup.Post("/:payoutID/reject", adminAction(h.service.Reject))

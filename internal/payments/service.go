@@ -16,7 +16,7 @@ import (
 	"test-api/internal/wallet"
 )
 
-const OfficialMinimumAmountIRR int64 = 10_000
+const OfficialMinimumAmountIRR = booking.GatewayMinimumAmountIRR
 
 var (
 	ErrInvalidInput     = errors.New("invalid payment input")

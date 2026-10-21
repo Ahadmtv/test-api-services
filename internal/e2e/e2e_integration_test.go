@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"test-api/internal/adminapi"
 	"test-api/internal/auth"
 	"test-api/internal/booking"
 	"test-api/internal/catalog"
@@ -199,7 +200,7 @@ func setupE2E(t *testing.T) *e2eEnv {
 	authGroup.Post("/login", authHandler.Login)
 	authGroup.Post("/refresh", authHandler.Refresh)
 	authGroup.Post("/logout", authHandler.Logout)
-	fiberApp.Get("/api/v1/me", auth.Authenticator(e2eSecret), authHandler.Me)
+	fiberApp.Get("/api/v1/me", auth.Authenticator(e2eSecret, identityService), authHandler.Me)
 
 	policy := scheduling.AvailabilityPolicy{
 		SlotIncrement:  15 * time.Minute,
@@ -207,16 +208,17 @@ func setupE2E(t *testing.T) *e2eEnv {
 		MaximumHorizon: 90 * 24 * time.Hour,
 	}
 	providerHandler := providerapi.NewHandler(providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), scheduling.NewOccupancyStore(pool), policy)
-	providerHandler.Register(fiberApp, e2eSecret)
+	providerHandler.Register(fiberApp, e2eSecret, identityService)
 
 	walletService := wallet.NewService(pool)
-	wallet.NewHandler(walletService).Register(fiberApp, e2eSecret)
+	wallet.NewHandler(walletService).Register(fiberApp, e2eSecret, identityService)
 	gateway := &payments.FakeGateway{}
-	payments.NewHandler(payments.NewService(pool, walletService, gateway, "https://test.local/api/v1/payments/zarinpal/callback"), auth.NewRateLimiter(1000), "").Register(fiberApp, e2eSecret)
+	payments.NewHandler(payments.NewService(pool, walletService, gateway, "https://test.local/api/v1/payments/zarinpal/callback"), auth.NewRateLimiter(1000), "").Register(fiberApp, e2eSecret, identityService)
 	bookingConfig := booking.Config{Availability: policy, CompletionDisputeWindow: 24 * time.Hour}
 	bookingService := booking.NewService(pool, providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), bookingConfig, walletService)
-	booking.NewHandler(bookingService, bookingConfig).Register(fiberApp, e2eSecret)
-	payouts.NewHandler(payouts.NewService(pool, providers.NewService(pool), 0)).Register(fiberApp, e2eSecret)
+	booking.NewHandler(bookingService, bookingConfig).Register(fiberApp, e2eSecret, identityService)
+	payouts.NewHandler(payouts.NewService(pool, providers.NewService(pool), 0)).Register(fiberApp, e2eSecret, identityService)
+	adminapi.NewHandler(identityService).Register(fiberApp, e2eSecret, identityService)
 
 	env := &e2eEnv{t: t, app: fiberApp, pool: pool}
 	env.clientEmail = env.register("client")
@@ -424,7 +426,7 @@ func TestFullBusinessWorkflow(t *testing.T) {
 	})
 
 	t.Run("insufficient_funds_then_topup", func(t *testing.T) {
-		status, _, raw := helperDo(t, e.app, http.MethodPost, "/api/v1/bookings", e.clientToken,
+		status, _, raw = helperDo(t, e.app, http.MethodPost, "/api/v1/bookings", e.clientToken,
 			fmt.Sprintf(`{"service_id":%d,"starts_at":%q}`, serviceID, nextSlot(t).Format(time.RFC3339)), "e2e-insufficient")
 		expectStatus(t, status, http.StatusConflict, "booking without funds", raw)
 
@@ -528,4 +530,110 @@ func TestFullBusinessWorkflow(t *testing.T) {
 	t.Run("financial_integrity", func(t *testing.T) {
 		e.assertLedgerBalanced()
 	})
+}
+
+func TestAdminRoleManagement(t *testing.T) {
+	e := setupE2E(t)
+
+	status, _, raw := helperDo(t, e.app, http.MethodGet, "/api/v1/admin/users", e.clientToken, "", "")
+	expectStatus(t, status, http.StatusForbidden, "client cannot list users", raw)
+
+	status, page, raw := helperDo(t, e.app, http.MethodGet, "/api/v1/admin/users?q="+url.QueryEscape(e.clientEmail), e.adminToken, "", "")
+	expectStatus(t, status, http.StatusOK, "admin lists users", raw)
+	items, ok := page["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("admin user search returned %v", page)
+	}
+	first, ok := items[0].(map[string]any)
+	if !ok || number(t, first, "id", "searched user") != e.clientID {
+		t.Fatalf("admin user search returned wrong user: %v", items[0])
+	}
+
+	status, updated, raw := helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/provider", e.clientID), e.adminToken, `{"granted":true}`, "")
+	expectStatus(t, status, http.StatusOK, "grant provider role", raw)
+	if got := fmt.Sprint(updated["roles"]); !strings.Contains(got, "provider") {
+		t.Fatalf("granted roles=%v", updated["roles"])
+	}
+
+	// The token minted before the grant must immediately observe the new role.
+	status, _, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/provider/services", e.clientToken, "", "")
+	expectStatus(t, status, http.StatusOK, "existing token observes granted role", raw)
+
+	var auditCount int
+	if err := e.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM audit_events
+		WHERE actor_user_id = $1 AND target_id = $2 AND action = 'user.role.granted'
+	`, e.adminID, e.clientID).Scan(&auditCount); err != nil {
+		t.Fatalf("count role audit event: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("role audit events=%d; want 1", auditCount)
+	}
+
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/provider", e.clientID), e.adminToken, `{"granted":false}`, "")
+	expectStatus(t, status, http.StatusOK, "revoke provider role", raw)
+
+	status, _, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/provider/services", e.clientToken, "", "")
+	expectStatus(t, status, http.StatusForbidden, "existing token observes revoked role", raw)
+
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/admin", e.clientID), e.adminToken, `{"granted":true}`, "")
+	expectStatus(t, status, http.StatusOK, "grant admin role", raw)
+	clientAdminToken, _ := e.login(e.clientEmail)
+
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/admin", e.adminID), clientAdminToken, `{"granted":false}`, "")
+	expectStatus(t, status, http.StatusOK, "revoke admin role", raw)
+
+	// Revocation is effective immediately for the old administrator token.
+	status, _, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/admin/users", e.adminToken, "", "")
+	expectStatus(t, status, http.StatusForbidden, "revoked admin token is rejected", raw)
+
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/admin", e.clientID), clientAdminToken, `{"granted":false}`, "")
+	expectStatus(t, status, http.StatusConflict, "cannot remove own admin role", raw)
+
+}
+func TestGatewayMinimumRejectedBeforeSlotReservation(t *testing.T) {
+	e := setupE2E(t)
+
+	status, _, raw := helperDo(t, e.app, http.MethodPut, "/api/v1/provider/profile", e.providerToken,
+		`{"display_name":"Minimum Test Provider","is_active":true,"time_zone":"Asia/Tehran"}`, "")
+	expectStatus(t, status, http.StatusOK, "put low-price provider profile", raw)
+
+	var intervals []string
+	for weekday := 1; weekday <= 7; weekday++ {
+		intervals = append(intervals, fmt.Sprintf(`{"weekday":%d,"opens_at":"09:00","closes_at":"20:00"}`, weekday))
+	}
+	status, _, raw = helperDo(t, e.app, http.MethodPut, "/api/v1/provider/working-hours", e.providerToken,
+		`{"intervals":[`+strings.Join(intervals, ",")+`]}`, "")
+	expectStatus(t, status, http.StatusOK, "put low-price working hours", raw)
+	status, _, raw = helperDo(t, e.app, http.MethodPatch,
+		fmt.Sprintf("/api/v1/admin/providers/%d/verification", e.providerID), e.adminToken,
+		`{"verification_status":"verified"}`, "")
+	expectStatus(t, status, http.StatusOK, "verify low-price provider", raw)
+
+	status, service, raw := helperDo(t, e.app, http.MethodPost, "/api/v1/provider/services", e.providerToken,
+		`{"name":"Low Price Service","category":"haircut","duration_minutes":30,"price_irr":5000,"is_active":true}`, "")
+	expectStatus(t, status, http.StatusCreated, "create low-price service", raw)
+	serviceID := number(t, service, "id", "create low-price service")
+
+	status, _, raw = helperDo(t, e.app, http.MethodPost, "/api/v1/bookings", e.clientToken,
+		fmt.Sprintf(`{"service_id":%d,"starts_at":%q,"payment_method":"zarinpal"}`, serviceID, nextSlot(t).Format(time.RFC3339)), "e2e-payment-minimum")
+	expectStatus(t, status, http.StatusBadRequest, "reject gateway payment below minimum", raw)
+	if !strings.Contains(raw, `"code":"payment_minimum_not_met"`) {
+		t.Fatalf("payment minimum response=%s", raw)
+	}
+
+	var bookings int
+	if err := e.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM bookings WHERE service_id = $1 AND client_id = $2
+	`, serviceID, e.clientID).Scan(&bookings); err != nil {
+		t.Fatalf("count low-price bookings: %v", err)
+	}
+	if bookings != 0 {
+		t.Fatalf("low-price payment attempt reserved %d bookings", bookings)
+	}
 }

@@ -22,10 +22,10 @@ func NewHandler(service *Service, rateLimiter *auth.RateLimiter, returnURL strin
 	return &Handler{service: service, rateLimiter: rateLimiter, returnURL: returnURL}
 }
 
-func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers ...auth.PrincipalResolver) {
 	app.Get("/api/v1/payments/zarinpal/callback", h.Callback)
 	group := app.Group("/api/v1/payments")
-	group.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("client"))
+	group.Use(auth.Authenticator(accessTokenSecret, resolvers...), auth.RequireRoles("client"))
 	group.Post("/zarinpal", h.rateLimited(h.Create))
 	group.Get("/:paymentID", h.Get)
 }
@@ -144,6 +144,8 @@ func paymentError(err error) error {
 		return platform.NewAppError("payment_not_found", "پرداخت پیدا نشد", 404, nil)
 	case errors.Is(err, ErrPaymentConflict):
 		return platform.NewAppError("payment_conflict", "وضعیت پرداخت امکان این عملیات را نمی‌دهد", 409, nil)
+	case errors.Is(err, ErrPaymentMismatch):
+		return platform.NewAppError("payment_mismatch", "اطلاعات پرداخت تأییدشده با پرداخت ثبت‌شده هم‌خوانی ندارد", 409, nil)
 	case errors.Is(err, ErrGatewayUnavailable):
 		return platform.NewAppError("payment_provider_unavailable", "درگاه پرداخت در دسترس نیست", 503, err)
 	case errors.Is(err, ErrGatewayUnknownOutcome):

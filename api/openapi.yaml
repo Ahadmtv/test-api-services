@@ -389,6 +389,84 @@ paths:
           $ref: '#/components/responses/Problem'
         '409':
           $ref: '#/components/responses/Problem'
+  /api/v1/admin/users:
+    get:
+      summary: فهرست کاربران برای مدیر
+      description: حساب‌ها را با صفحه‌بندی cursor-based، جست‌وجوی متنی و فیلتر نقش برمی‌گرداند. نقش‌های بازگشتی وضعیت جاری پایگاه داده هستند و ممکن است با نقش‌های توکن دسترسی متفاوت باشند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: q
+          in: query
+          required: false
+          description: جست‌وجو در ایمیل، تلفن و نام نمایشی ارائه‌دهنده
+          schema:
+            type: string
+            maxLength: 100
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [client, provider, admin]
+      responses:
+        '200':
+          description: صفحه کاربران
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserPage'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+  /api/v1/admin/users/{userID}/roles/{role}:
+    put:
+      summary: اعطا یا لغو نقش کاربر
+      description: فقط نقش‌های provider و admin قابل تغییرند. مدیر نمی‌تواند نقش حساب خود را تغییر دهد و آخرین مدیر فعال قابل حذف نیست. تغییر نقش و رخداد حسابرسی در یک تراکنش ثبت می‌شوند و در درخواست‌های بعدی همان توکن نیز اثر می‌کنند.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: role
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [provider, admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRoleMutationInput'
+      responses:
+        '200':
+          description: کاربر به‌روزشده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
   /api/v1/admin/providers/{providerID}/verification:
     patch:
       summary: تغییر وضعیت تأیید ارائه‌دهنده
@@ -602,7 +680,7 @@ paths:
   /api/v1/bookings:
     post:
       summary: ایجاد رزرو
-      description: مشتری شناسه خدمت، زمان آغاز و به‌صورت اختیاری روش پرداخت را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. پیش‌فرض payment_method=wallet است و رزرو در همان تراکنش confirmed می‌شود و مبلغ از مانده قابل‌استفاده به قفل می‌رود. با payment_method=zarinpal رزرو pending_payment با payment_expires_at ساخته می‌شود و فقط پس از Verify موفق به confirmed می‌رسد؛ در این مسیر مانده قابل‌استفاده کیف پول تغییر نمی‌کند.
+      description: مشتری شناسه خدمت، زمان آغاز و به‌صورت اختیاری روش پرداخت را ارسال می‌کند؛ مدت، پایان، بافر، مبلغ و ارائه‌دهنده از داده معتبر سرور محاسبه و snapshot می‌شوند. پیش‌فرض payment_method=wallet است و رزرو در همان تراکنش confirmed می‌شود و مبلغ از مانده قابل‌استفاده به قفل می‌رود. با payment_method=zarinpal رزرو pending_payment با payment_expires_at ساخته می‌شود و فقط پس از Verify موفق به confirmed می‌رسد؛ در این مسیر مانده قابل‌استفاده کیف پول تغییر نمی‌کند. اگر مبلغ خدمت مثبت و کمتر از حداقل ۱۰٬۰۰۰ ریال درگاه باشد، درخواست Zarinpal پیش از هرگونه قفل زمان با خطای payment_minimum_not_met و وضعیت 400 رد می‌شود.
       security:
         - bearerAuth: []
       parameters:
@@ -1138,6 +1216,39 @@ components:
         roles:
           type: array
           items: { type: string }
+    AdminUser:
+      type: object
+      required: [id, email, phone, display_name, roles, is_active, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string, format: email }
+        phone: { type: [string, 'null'] }
+        display_name: { type: string, maxLength: 160 }
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [client, provider, admin]
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    AdminUserPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUser'
+        next_cursor:
+          type: [integer, 'null']
+          format: int64
+          minimum: 1
+    AdminRoleMutationInput:
+      type: object
+      additionalProperties: false
+      required: [granted]
+      properties:
+        granted: { type: boolean }
     Problem:
       type: object
       required: [type, title, status, code, request_id]

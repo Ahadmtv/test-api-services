@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -11,9 +12,20 @@ import (
 	"test-api/internal/platform"
 )
 
+// PrincipalResolver loads the caller's current server-side identity. When
+// supplied, it replaces the roles embedded in the access token so role changes
+// and deactivations take effect immediately.
+type PrincipalResolver interface {
+	ResolvePrincipal(ctx context.Context, userID int64) (identity.Principal, error)
+}
+
 // Authenticator validates a JWT access token and populates the request with the
 // authenticated principal. Client-supplied roles/IDs are never trusted.
-func Authenticator(accessTokenSecret string) fiber.Handler {
+func Authenticator(accessTokenSecret string, resolvers ...PrincipalResolver) fiber.Handler {
+	var resolver PrincipalResolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
 	return func(c fiber.Ctx) error {
 		auth := c.Get("Authorization")
 		if auth == "" {
@@ -31,16 +43,26 @@ func Authenticator(accessTokenSecret string) fiber.Handler {
 			return platform.NewAppError(code, message, 401, nil)
 		}
 
-		roles := claims.Roles
-		if roles == nil {
-			roles = []string{}
-		}
-
-		c.Locals(platform.PrincipalKey, identity.Principal{
+		principal := identity.Principal{
 			UserID: claims.UserID,
 			Email:  claims.Email,
-			Roles:  roles,
-		})
+			Roles:  claims.Roles,
+		}
+		if resolver != nil {
+			current, err := resolver.ResolvePrincipal(c.Context(), claims.UserID)
+			if err != nil {
+				if errors.Is(err, identity.ErrUserNotFound) || errors.Is(err, identity.ErrUserInactive) {
+					return platform.NewAppError("unauthenticated", "احراز هویت ضروری است", 401, nil)
+				}
+				return platform.Unexpected(err)
+			}
+			principal = current
+		}
+		if principal.Roles == nil {
+			principal.Roles = []string{}
+		}
+
+		c.Locals(platform.PrincipalKey, principal)
 		return c.Next()
 	}
 }

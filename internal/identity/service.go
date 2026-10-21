@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,7 +54,18 @@ var (
 	ErrRefreshTokenExpired  = errors.New("refresh token expired")
 	ErrRefreshTokenRevoked  = errors.New("refresh token revoked")
 	ErrTokenReplayDetected  = errors.New("token replay detected; all sessions revoked")
+	ErrInvalidInput         = errors.New("invalid input")
+	ErrUserInactive         = errors.New("user inactive")
+	ErrInvalidRole          = errors.New("invalid role")
+	ErrSelfRoleChange       = errors.New("cannot change own roles")
+	ErrLastAdmin            = errors.New("cannot remove the last active admin")
 )
+
+// AdminUserPage is a cursor page of administrative user records.
+type AdminUserPage struct {
+	Items      []AdminUser `json:"items"`
+	NextCursor *int64      `json:"next_cursor"`
+}
 
 // Register creates a new account. The default role "client" is assigned
 // server-side; additional roles (provider, admin) are granted by an
@@ -252,6 +264,149 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 		return fmt.Errorf("revoke refresh token: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+// ResolvePrincipal reloads the caller's current identity from PostgreSQL so
+// role changes and account deactivation take effect without waiting for the
+// access token to expire.
+func (s *Service) ResolvePrincipal(ctx context.Context, userID int64) (Principal, error) {
+	record, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return Principal{}, ErrUserNotFound
+		}
+		return Principal{}, fmt.Errorf("resolve principal: %w", err)
+	}
+	if !record.IsActive {
+		return Principal{}, ErrUserInactive
+	}
+	return Principal{UserID: record.ID, Email: record.Email, Roles: record.Roles}, nil
+}
+
+// AdminListUsers returns a cursor page of accounts for administrators.
+func (s *Service) AdminListUsers(ctx context.Context, after int64, limit int, query, role string) (*AdminUserPage, error) {
+	if after < 0 || limit < 1 || limit > 100 {
+		return nil, ErrInvalidInput
+	}
+	if role != "" && role != "client" && role != "provider" && role != "admin" {
+		return nil, ErrInvalidRole
+	}
+	users, hasMore, err := s.store.ListAdminUsers(ctx, after, limit, query, role)
+	if err != nil {
+		return nil, err
+	}
+	page := &AdminUserPage{Items: users}
+	if hasMore && len(users) > 0 {
+		next := users[len(users)-1].ID
+		page.NextCursor = &next
+	}
+	return page, nil
+}
+
+// AdminSetRole grants or revokes a provider/admin role. The actor cannot change
+// their own roles, the last active administrator cannot be demoted, and both
+// the role mutation and its audit event commit atomically.
+func (s *Service) AdminSetRole(ctx context.Context, actorID, targetID int64, role string, granted bool, requestID string) (*AdminUser, error) {
+	if actorID < 1 || targetID < 1 {
+		return nil, ErrInvalidInput
+	}
+	if role != "provider" && role != "admin" {
+		return nil, ErrInvalidRole
+	}
+	if actorID == targetID {
+		return nil, ErrSelfRoleChange
+	}
+
+	tx, err := s.store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin role change: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			s.logger.Error("rollback failed", "error", rbErr)
+		}
+	}()
+
+	if err := s.store.LockAdminRoleChanges(ctx, tx); err != nil {
+		return nil, err
+	}
+	target, err := s.store.GetUserForUpdate(ctx, tx, targetID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	if !target.IsActive {
+		return nil, ErrUserInactive
+	}
+	if !granted && role == "admin" && containsRole(target.Roles, "admin") {
+		otherAdmins, err := s.store.CountOtherActiveAdmins(ctx, tx, targetID)
+		if err != nil {
+			return nil, err
+		}
+		if otherAdmins == 0 {
+			return nil, ErrLastAdmin
+		}
+	}
+
+	oldRoles := append([]string(nil), target.Roles...)
+	changed, err := s.store.SetRole(ctx, tx, targetID, role, granted)
+	if err != nil {
+		return nil, err
+	}
+	newRoles := replaceRole(oldRoles, role, granted)
+	if changed {
+		action := "user.role.revoked"
+		if granted {
+			action = "user.role.granted"
+		}
+		if err := s.store.InsertAuditEvent(ctx, tx, actorID, targetID, action, requestID, map[string]any{
+			"role":      role,
+			"granted":   granted,
+			"old_roles": oldRoles,
+			"new_roles": newRoles,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit role change: %w", err)
+	}
+
+	return &AdminUser{
+		ID:          target.ID,
+		Email:       target.Email,
+		Phone:       target.Phone,
+		DisplayName: target.DisplayName,
+		Roles:       newRoles,
+		IsActive:    target.IsActive,
+		CreatedAt:   target.CreatedAt,
+	}, nil
+}
+
+func containsRole(roles []string, role string) bool {
+	for _, current := range roles {
+		if current == role {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceRole(roles []string, role string, granted bool) []string {
+	result := make([]string, 0, len(roles)+1)
+	for _, current := range roles {
+		if current == role {
+			continue
+		}
+		result = append(result, current)
+	}
+	if granted {
+		result = append(result, role)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // Me returns the authenticated user's public profile.

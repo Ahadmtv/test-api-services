@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	"test-api/internal/adminapi"
 	"test-api/internal/auth"
 	"test-api/internal/booking"
 	"test-api/internal/catalog"
@@ -59,7 +60,9 @@ func run(ctx context.Context, args []string) error {
 			if err != nil {
 				return fmt.Errorf("payment gateway configuration: %w", err)
 			}
-			service := payments.NewService(db.Pool(), wallet.NewService(db.Pool()), gateway, cfg.Payments.CallbackURL)
+			walletService := wallet.NewService(db.Pool())
+			bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
+			service := payments.NewService(db.Pool(), walletService, gateway, cfg.Payments.CallbackURL, bookingService)
 			resolved, err := service.ReconcileUnknown(ctx, 100)
 			if err != nil {
 				return fmt.Errorf("reconcile uncertain payments: %w", err)
@@ -132,18 +135,19 @@ func run(ctx context.Context, args []string) error {
 		occupancy,
 		policy,
 	)
-	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	providerHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
 	walletService := wallet.NewService(db.Pool())
-	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	wallet.NewHandler(walletService).Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
 	bookingService := booking.NewService(db.Pool(), providers.NewService(db.Pool()), catalog.NewStore(db.Pool()), scheduling.NewStore(db.Pool()), bookingConfigFrom(cfg), walletService)
 	paymentGateway, err := payments.NewZarinpalGateway(cfg.Payments.MerchantID, payments.ZarinpalEnvironment(cfg.Payments.Environment))
 	if err != nil {
 		return fmt.Errorf("payment gateway configuration: %w", err)
 	}
-	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL, bookingService), rateLimiter, cfg.Payments.ReturnURL).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	payments.NewHandler(payments.NewService(db.Pool(), walletService, paymentGateway, cfg.Payments.CallbackURL, bookingService), rateLimiter, cfg.Payments.ReturnURL).Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
 	bookingHandler := booking.NewHandler(bookingService, bookingConfigFrom(cfg))
-	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
-	payouts.NewHandler(payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret)
+	bookingHandler.Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
+	payouts.NewHandler(payouts.NewService(db.Pool(), providers.NewService(db.Pool()), cfg.Payouts.MinAmountIRR)).Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
+	adminapi.NewHandler(service).Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
 
 	authGroup := app.Fiber().Group("/api/v1/auth")
 	authGroup.Post("/register", handler.Register)
@@ -151,11 +155,11 @@ func run(ctx context.Context, args []string) error {
 	authGroup.Post("/refresh", handler.Refresh)
 	authGroup.Post("/logout", handler.Logout)
 
-	app.Fiber().Get("/api/v1/me", auth.Authenticator(cfg.Auth.AccessTokenSecret), handler.Me)
+	app.Fiber().Get("/api/v1/me", auth.Authenticator(cfg.Auth.AccessTokenSecret, service), handler.Me)
 
 	// Admin-only diagnostic route.
 	adminGroup := app.Fiber().Group("/api/v1/admin")
-	adminGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret))
+	adminGroup.Use(auth.Authenticator(cfg.Auth.AccessTokenSecret, service))
 	adminGroup.Use(auth.RequireRoles("admin"))
 	adminGroup.Get("/whoami", func(c fiber.Ctx) error {
 		principal := c.Locals(platform.PrincipalKey).(identity.Principal)

@@ -56,6 +56,9 @@ const (
 	PaymentMethodWallet   = "wallet"
 	PaymentMethodZarinpal = "zarinpal"
 
+	// GatewayMinimumAmountIRR is the provider's official minimum charge unit.
+	GatewayMinimumAmountIRR int64 = 10_000
+
 	defaultPendingPaymentTTL = 15 * time.Minute
 )
 
@@ -123,6 +126,7 @@ var (
 	ErrDisputeNotFound       = errors.New("booking dispute not found")
 	ErrIdempotencyConflict   = errors.New("idempotency key payload conflict")
 	ErrPaymentAmountMismatch = errors.New("payment amount does not match booking")
+	ErrPaymentMinimum        = errors.New("gateway payment amount is below the provider minimum")
 )
 
 func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput, config Config) (*Booking, error) {
@@ -213,6 +217,9 @@ func (s *Service) Create(ctx context.Context, clientID int64, input CreateInput,
 			return nil, ErrServiceUnavailable
 		}
 		return nil, err
+	}
+	if paymentMethod == PaymentMethodZarinpal && service.PriceIRR > 0 && service.PriceIRR < GatewayMinimumAmountIRR {
+		return nil, ErrPaymentMinimum
 	}
 	startAt := input.StartsAt.UTC()
 	endAt := startAt.Add(time.Duration(service.DurationMinutes) * time.Minute)

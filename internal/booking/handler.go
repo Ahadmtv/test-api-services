@@ -27,16 +27,16 @@ func NewHandler(service *Service, config Config) *Handler {
 	return &Handler{service: service, config: config}
 }
 
-func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
+func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers ...auth.PrincipalResolver) {
 	bookings := app.Group("/api/v1/bookings")
-	bookings.Use(auth.Authenticator(accessTokenSecret))
+	bookings.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	bookings.Post("/", auth.RequireRoles("client"), h.Create)
 	bookings.Get("/", auth.RequireRoles("client"), h.ClientHistory)
 	bookings.Get("/:bookingID", auth.RequireRoles("client", "provider"), h.Get)
 	bookings.Post("/:bookingID/cancel", auth.RequireRoles("client"), h.Cancel)
 
 	provider := app.Group("/api/v1/provider/bookings")
-	provider.Use(auth.Authenticator(accessTokenSecret))
+	provider.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	provider.Use(auth.RequireRoles("provider"))
 	provider.Get("/", h.ProviderBookings)
 	provider.Post("/:bookingID/start", h.Start)
@@ -44,12 +44,12 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string) {
 	provider.Post("/:bookingID/cancel", h.CancelByProvider)
 
 	clientActions := app.Group("/api/v1/bookings")
-	clientActions.Use(auth.Authenticator(accessTokenSecret))
+	clientActions.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	clientActions.Post("/:bookingID/confirm-completion", auth.RequireRoles("client"), h.ConfirmCompletion)
 	clientActions.Post("/:bookingID/dispute", auth.RequireRoles("client"), h.Dispute)
 
 	admin := app.Group("/api/v1/admin")
-	admin.Use(auth.Authenticator(accessTokenSecret), auth.RequireRoles("admin"))
+	admin.Use(auth.Authenticator(accessTokenSecret, resolvers...), auth.RequireRoles("admin"))
 	admin.Post("/bookings/:bookingID/refund", h.Refund)
 	admin.Post("/bookings/:bookingID/dispute-resolution", h.ResolveDispute)
 }
@@ -325,6 +325,8 @@ func bookingError(err error) error {
 		return platform.NewAppError("idempotency_conflict", "کلید تکرار برای درخواست متفاوت استفاده شده است", 409, nil)
 	case errors.Is(err, ErrInvalidTransition):
 		return platform.NewAppError("invalid_booking_transition", "این تغییر وضعیت رزرو مجاز نیست", 409, nil)
+	case errors.Is(err, ErrPaymentMinimum):
+		return platform.NewAppError("payment_minimum_not_met", "مبلغ این خدمت کمتر از حداقل مجاز درگاه پرداخت است", 400, nil)
 	case errors.Is(err, ErrPaymentAmountMismatch):
 		return platform.NewAppError("payment_amount_mismatch", "مبلغ پرداخت با مبلغ رزرو هم‌خوانی ندارد", 409, nil)
 	case errors.Is(err, ErrCancellationClosed):
