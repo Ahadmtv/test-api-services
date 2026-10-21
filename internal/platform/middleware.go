@@ -97,8 +97,15 @@ func ErrorHandler(logger *slog.Logger) fiber.ErrorHandler {
 		fields := []any{"request_id", requestID(c)}
 
 		var appErr *AppError
-		if !errors.As(err, &appErr) {
-			appErr = Unexpected(err)
+		switch {
+		case errors.Is(err, fiber.ErrNotFound):
+			appErr = RouteNotFound()
+		case errors.Is(err, fiber.ErrMethodNotAllowed):
+			appErr = MethodNotAllowed()
+		default:
+			if !errors.As(err, &appErr) {
+				appErr = Unexpected(err)
+			}
 		}
 
 		if appErr.Status >= 500 || appErr.Err != nil {

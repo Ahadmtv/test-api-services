@@ -59,4 +59,23 @@ func DatabaseUnavailable(err error) *AppError {
 	}
 }
 
+// RouteNotFound maps the router-level 404 (no route matched) to a handled
+// problem response instead of the generic internal error.
+func RouteNotFound() *AppError {
+	return &AppError{
+		Code:    "route_not_found",
+		Message: "مسیر درخواستی یافت نشد",
+		Status:  404,
+	}
+}
+
+// MethodNotAllowed maps the router-level 405 to a handled problem response.
+func MethodNotAllowed() *AppError {
+	return &AppError{
+		Code:    "method_not_allowed",
+		Message: "روش دسترسی برای این مسیر مجاز نیست",
+		Status:  405,
+	}
+}
+
 var _ = errors.Is
