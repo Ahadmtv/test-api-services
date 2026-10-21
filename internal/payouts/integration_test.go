@@ -4,19 +4,24 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"test-api/internal/booking"
 	"test-api/internal/catalog"
+	"test-api/internal/identity"
 	"test-api/internal/platform"
 	"test-api/internal/providers"
 	"test-api/internal/scheduling"
@@ -527,6 +532,123 @@ func TestMarkPaidRequiresExternalReference(t *testing.T) {
 		t.Fatalf("paid rejected payout error=%v; want ErrConflict", err)
 	}
 	assertBalancedPayoutLedger(t, f.pool)
+}
+
+func TestAdminPayoutListAPI(t *testing.T) {
+	f := newPayoutFixture(t)
+	ctx := context.Background()
+
+	item, _, err := f.service.Create(ctx, CreateInput{
+		ProviderID: f.providerID, AmountIRR: f.earnings, IdempotencyKey: "admin-list-key",
+		RequestID: "admin-list-request", Nonce: "admin-list-request",
+	})
+	if err != nil {
+		t.Fatalf("create payout: %v", err)
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: platform.ErrorHandler(slog.New(slog.NewTextHandler(io.Discard, nil)))})
+	app.Use(platform.RequestID())
+	NewHandler(f.service).Register(app, "01234567890123456789012345678901")
+
+	type AdminPayoutItem struct {
+		ID                  int64  `json:"id"`
+		AmountIRR           int64  `json:"amount_irr"`
+		Status              string `json:"status"`
+		ProviderDisplayName string `json:"provider_display_name"`
+	}
+	var payoutPage struct {
+		Items      []AdminPayoutItem `json:"items"`
+		NextCursor *int64            `json:"next_cursor"`
+	}
+
+	adminToken := payoutToken(t, f.providerID, []string{"admin"})
+	clientToken := payoutToken(t, f.clientID, []string{"client"})
+
+	resp := payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts", "", "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous admin payout list status=%d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts", clientToken, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("client admin payout list status=%d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts?status=bogus", adminToken, "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid status filter status=%d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts", adminToken, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin payout list status=%d, want 200", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payoutPage); err != nil {
+		t.Fatalf("decode admin payout page: %v", err)
+	}
+	resp.Body.Close()
+	if payoutPage.NextCursor != nil {
+		t.Fatalf("single payout must not have next cursor, got %d", *payoutPage.NextCursor)
+	}
+	if len(payoutPage.Items) != 1 || payoutPage.Items[0].ID != item.ID || payoutPage.Items[0].Status != "requested" {
+		t.Fatalf("admin payout page=%+v, want requested payout %d", payoutPage.Items, item.ID)
+	}
+	if payoutPage.Items[0].ProviderDisplayName != "Payout Provider" {
+		t.Fatalf("provider display name=%q, want resolved", payoutPage.Items[0].ProviderDisplayName)
+	}
+
+	resp = payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts?status=processing", adminToken, "")
+	var processingPage struct {
+		Items []AdminPayoutItem `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&processingPage); err != nil {
+		t.Fatalf("decode processing filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(processingPage.Items) != 0 {
+		t.Fatalf("processing filter returned %+v, want empty", processingPage.Items)
+	}
+
+	if _, err := f.service.Approve(ctx, f.providerID, item.ID, "", "approve"); err != nil {
+		t.Fatalf("approve payout: %v", err)
+	}
+	resp = payoutRequest(t, app, http.MethodGet, "/api/v1/admin/payouts?status=approved", adminToken, "")
+	var approvedPage struct {
+		Items []AdminPayoutItem `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&approvedPage); err != nil {
+		t.Fatalf("decode approved filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(approvedPage.Items) != 1 || approvedPage.Items[0].ID != item.ID || approvedPage.Items[0].Status != "approved" {
+		t.Fatalf("approved filter returned %+v, want payout %d approved", approvedPage.Items, item.ID)
+	}
+}
+
+func payoutToken(t *testing.T, userID int64, roles []string) string {
+	t.Helper()
+	token, _, err := identity.IssueAccessToken(userID, "payout-admin@example.test", roles, identity.AccessTokenConfig{Secret: "01234567890123456789012345678901", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("issue payout test token: %v", err)
+	}
+	return token
+}
+
+func payoutRequest(t *testing.T, app *fiber.App, method, path, token, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(method, "http://test.local"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create payout request: %v", err)
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatalf("send payout request: %v", err)
+	}
+	return response
 }
 
 func assertBalancedPayoutLedger(t *testing.T, pool *pgxpool.Pool) {

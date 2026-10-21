@@ -527,6 +527,129 @@ func TestBookingAPIAuthorizationAndOwnership(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestAdminBookingListAPI(t *testing.T) {
+	f := newBookingFixture(t)
+	app := fiber.New(fiber.Config{ErrorHandler: platform.ErrorHandler(slog.New(slog.NewTextHandler(io.Discard, nil)))})
+	app.Use(platform.RequestID())
+	NewHandler(f.service, f.config).Register(app, integrationSecret)
+
+	start := nextBookingStart()
+	created, err := f.service.Create(context.Background(), f.clientID, CreateInput{ServiceID: f.serviceID, StartsAt: start}, f.config)
+	if err != nil {
+		t.Fatalf("create booking: %v", err)
+	}
+
+	clientToken := bookingToken(t, f.clientID, []string{"client"})
+	providerToken := bookingToken(t, f.providerID, []string{"provider"})
+	adminToken := bookingToken(t, f.providerID, []string{"admin"})
+
+	type adminBookingItem struct {
+		ID                  int64  `json:"id"`
+		Status              string `json:"status"`
+		ServiceName         string `json:"service_name"`
+		PriceIRR            int64  `json:"price_irr"`
+		ClientEmail         string `json:"client_email"`
+		ProviderDisplayName string `json:"provider_display_name"`
+		HasOpenDispute      bool   `json:"has_open_dispute"`
+		Refundable          bool   `json:"refundable"`
+	}
+	type adminBookingPage struct {
+		Items      []adminBookingItem `json:"items"`
+		NextCursor *int64             `json:"next_cursor"`
+	}
+
+	resp := bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings", "", "", "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous admin booking list status=%d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings", clientToken, "", "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("client admin booking list status=%d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings", providerToken, "", "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("provider admin booking list status=%d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?status=bogus", adminToken, "", "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid status filter status=%d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?refundable=maybe", adminToken, "", "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid refundable filter status=%d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings", adminToken, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin booking list status=%d, want 200", resp.StatusCode)
+	}
+	var page adminBookingPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode admin booking page: %v", err)
+	}
+	resp.Body.Close()
+	if page.NextCursor != nil {
+		t.Fatalf("single booking must not have next cursor, got %d", *page.NextCursor)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("admin sees %d bookings, want 1", len(page.Items))
+	}
+	item := page.Items[0]
+	if item.ID != created.ID || item.Status != "confirmed" || item.PriceIRR != created.PriceIRR {
+		t.Fatalf("admin booking item=%+v, want booking %d confirmed", item, created.ID)
+	}
+	if item.HasOpenDispute || item.Refundable {
+		t.Fatalf("fresh booking flags=%+v, want dispute=false refundable=false", item)
+	}
+	if item.ClientEmail == "" || item.ProviderDisplayName != "Provider" {
+		t.Fatalf("admin booking contact fields=%+v", item)
+	}
+
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?status=cancelled", adminToken, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cancelled filter status=%d, want 200", resp.StatusCode)
+	}
+	var cancelled adminBookingPage
+	if err := json.NewDecoder(resp.Body).Decode(&cancelled); err != nil {
+		t.Fatalf("decode cancelled filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(cancelled.Items) != 0 {
+		t.Fatalf("cancelled filter returned %+v, want empty", cancelled.Items)
+	}
+
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?q="+created.ServiceName, adminToken, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("text filter status=%d, want 200", resp.StatusCode)
+	}
+	var byService adminBookingPage
+	if err := json.NewDecoder(resp.Body).Decode(&byService); err != nil {
+		t.Fatalf("decode text filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(byService.Items) != 1 || byService.Items[0].ID != created.ID {
+		t.Fatalf("text filter returned %+v, want booking %d", byService.Items, created.ID)
+	}
+
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?refundable=true", adminToken, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refundable filter status=%d, want 200", resp.StatusCode)
+	}
+	var refundable adminBookingPage
+	if err := json.NewDecoder(resp.Body).Decode(&refundable); err != nil {
+		t.Fatalf("decode refundable filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(refundable.Items) != 0 {
+		t.Fatalf("refundable filter returned %+v, want empty for unsettled hold", refundable.Items)
+	}
+}
+
 func nextBookingStart() time.Time {
 	location, _ := time.LoadLocation("Asia/Tehran")
 	day := time.Now().In(location).AddDate(0, 0, 3)

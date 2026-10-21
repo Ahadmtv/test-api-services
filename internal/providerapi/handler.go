@@ -51,7 +51,33 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers .
 	admin := app.Group("/api/v1/admin")
 	admin.Use(authenticator(accessTokenSecret, resolvers...))
 	admin.Use(auth.RequireRoles("admin"))
+	admin.Get("/providers", h.AdminListProviders)
 	admin.Patch("/providers/:providerID/verification", h.SetVerificationStatus)
+}
+
+// AdminListProviders returns every provider profile for administrators with
+// an optional verification_status filter and a text search.
+func (h *Handler) AdminListProviders(c fiber.Ctx) error {
+	after, limit, err := pageParams(c)
+	if err != nil {
+		return err
+	}
+	status := strings.TrimSpace(c.Query("verification_status"))
+	if status != "" && status != "pending" && status != "verified" && status != "rejected" {
+		return platform.NewAppError("invalid_verification_status", "وضعیت تأیید نامعتبر است", 400, nil)
+	}
+	query := strings.TrimSpace(c.Query("q"))
+	if len([]rune(query)) > 100 {
+		query = string([]rune(query)[:100])
+	}
+	page, err := h.profiles.AdminList(c.Context(), after, limit, status, query)
+	if err != nil {
+		if errors.Is(err, providers.ErrInvalidProfile) {
+			return invalidRequest()
+		}
+		return platform.Unexpected(err)
+	}
+	return c.JSON(page)
 }
 
 func (h *Handler) GetAvailability(c fiber.Ctx) error {

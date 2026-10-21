@@ -301,6 +301,181 @@ func TestStage03APIIntegration(t *testing.T) {
 	}
 }
 
+func TestAdminProviderListAPI(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL is not set; skipping provider API integration test")
+	}
+	ctx := context.Background()
+	adminPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to database: %v", err)
+	}
+	defer adminPool.Close()
+
+	schemaBytes := make([]byte, 8)
+	if _, err := rand.Read(schemaBytes); err != nil {
+		t.Fatalf("generate test schema: %v", err)
+	}
+	schema := "provider_admin_test_" + hex.EncodeToString(schemaBytes)
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	defer adminPool.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatalf("connect to test schema: %v", err)
+	}
+	defer pool.Close()
+
+	migrator, err := platform.NewMigrator(pool, nilLogger())
+	if err != nil {
+		t.Fatalf("create migrator: %v", err)
+	}
+	if err := migrator.Up(ctx); err != nil {
+		t.Fatalf("migrate test schema: %v", err)
+	}
+
+	var p1ID, p2ID, clientID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('first@example.test', 'x') RETURNING id`).Scan(&p1ID); err != nil {
+		t.Fatalf("create first provider: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('second@example.test', 'x') RETURNING id`).Scan(&p2ID); err != nil {
+		t.Fatalf("create second provider: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('client@example.test', 'x') RETURNING id`).Scan(&clientID); err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	for _, row := range []struct {
+		id     int64
+		name   string
+		status string
+	}{
+		{p1ID, "Alpha Salon", "pending"},
+		{p2ID, "Beta Studio", "verified"},
+	} {
+		if _, err := pool.Exec(ctx, `INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status) VALUES ($1, $2, TRUE, $3)`, row.id, row.name, row.status); err != nil {
+			t.Fatalf("create profile %d: %v", row.id, err)
+		}
+	}
+
+	app := fiber.New(fiber.Config{ErrorHandler: platform.ErrorHandler(nilLogger())})
+	app.Use(platform.RequestID())
+	occupancy := scheduling.NewOccupancyStore(pool)
+	policy := scheduling.AvailabilityPolicy{SlotIncrement: 15 * time.Minute, MinimumNotice: 2 * time.Hour, MaximumHorizon: 90 * 24 * time.Hour}
+	NewHandler(providers.NewService(pool), catalog.NewStore(pool), scheduling.NewStore(pool), occupancy, policy).Register(app, integrationSecret)
+
+	adminToken := integrationTokenWithRoles(t, p1ID, []string{"admin"})
+	clientToken := integrationTokenWithRoles(t, clientID, []string{"client"})
+
+	type adminProviderItem struct {
+		ProviderID         int64  `json:"provider_id"`
+		DisplayName        string `json:"display_name"`
+		VerificationStatus string `json:"verification_status"`
+		OwnerEmail         string `json:"owner_email"`
+	}
+	type adminProviderPage struct {
+		Items      []adminProviderItem `json:"items"`
+		NextCursor *int64              `json:"next_cursor"`
+	}
+
+	resp := doRequest(t, app, http.MethodGet, "/api/v1/admin/providers", "", "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous admin provider list status = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers", clientToken, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("client admin provider list status = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers?verification_status=bogus", adminToken, "")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid verification filter status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers", adminToken, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin provider list status = %d, want 200", resp.StatusCode)
+	}
+	var page adminProviderPage
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode admin provider page: %v", err)
+	}
+	resp.Body.Close()
+	if page.NextCursor != nil {
+		t.Fatalf("two profiles cannot produce next cursor, got %d", *page.NextCursor)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("admin sees %d providers, want 2", len(page.Items))
+	}
+	if page.Items[0].OwnerEmail != "first@example.test" || page.Items[0].VerificationStatus != "pending" {
+		t.Fatalf("admin provider item[0]=%+v", page.Items[0])
+	}
+	if page.Items[1].DisplayName != "Beta Studio" || page.Items[1].VerificationStatus != "verified" {
+		t.Fatalf("admin provider item[1]=%+v", page.Items[1])
+	}
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers?verification_status=verified", adminToken, "")
+	var verified adminProviderPage
+	if err := json.NewDecoder(resp.Body).Decode(&verified); err != nil {
+		t.Fatalf("decode verified filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(verified.Items) != 1 || verified.Items[0].ProviderID != p2ID {
+		t.Fatalf("verified filter returned %+v, want only provider %d", verified.Items, p2ID)
+	}
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers?q=beta", adminToken, "")
+	var byName adminProviderPage
+	if err := json.NewDecoder(resp.Body).Decode(&byName); err != nil {
+		t.Fatalf("decode name filter page: %v", err)
+	}
+	resp.Body.Close()
+	if len(byName.Items) != 1 || byName.Items[0].ProviderID != p2ID {
+		t.Fatalf("name filter returned %+v, want only provider %d", byName.Items, p2ID)
+	}
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers?limit=1", adminToken, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("limited admin provider list status = %d, want 200", resp.StatusCode)
+	}
+	var limited adminProviderPage
+	if err := json.NewDecoder(resp.Body).Decode(&limited); err != nil {
+		t.Fatalf("decode limited page: %v", err)
+	}
+	resp.Body.Close()
+	if len(limited.Items) != 1 || limited.Items[0].ProviderID != p1ID || limited.NextCursor == nil || *limited.NextCursor != p1ID {
+		t.Fatalf("limited page=%+v next=%v, want first item with its own cursor", limited.Items, limited.NextCursor)
+	}
+
+	var serviceID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, category, duration_minutes, price_irr) VALUES ($1, 'Alpha service', 'haircut', 30, 10000) RETURNING id`, p1ID).Scan(&serviceID); err != nil {
+		t.Fatalf("create provider service: %v", err)
+	}
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/provider/services", integrationToken(t, p1ID), "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("provider services list status = %d, want 200", resp.StatusCode)
+	}
+	var services struct {
+		Items []catalog.ServiceItem `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&services); err != nil {
+		t.Fatalf("decode provider services: %v", err)
+	}
+	resp.Body.Close()
+	if len(services.Items) != 1 || services.Items[0].ID != serviceID || services.Items[0].ProviderDisplayName != "Alpha Salon" {
+		t.Fatalf("provider services=%+v, want service %d with display name of provider", services.Items, serviceID)
+	}
+}
+
 func integrationToken(t *testing.T, userID int64) string {
 	return integrationTokenWithRoles(t, userID, []string{"provider"})
 }

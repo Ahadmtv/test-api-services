@@ -207,36 +207,71 @@ func (s *Service) List(ctx context.Context, providerID, after int64, limit int) 
 	return items, more, nil
 }
 
-// ListAll returns every payout request for administrators.
-func (s *Service) ListAll(ctx context.Context, after int64, limit int) ([]Request, bool, error) {
+// AdminPayout is the administrator view of a payout request with the
+// provider's display name resolved for list screens.
+type AdminPayout struct {
+	Request
+	ProviderDisplayName string `json:"provider_display_name"`
+}
+
+type AdminPayoutPage struct {
+	Items      []AdminPayout `json:"items"`
+	NextCursor *int64        `json:"next_cursor"`
+}
+
+// ListAll returns every payout request for administrators with keyset
+// pagination and an optional status filter.
+func (s *Service) ListAll(ctx context.Context, after int64, limit int, status string) (*AdminPayoutPage, error) {
 	if after < 0 || limit < 1 || limit > 100 {
-		return nil, false, ErrInvalidInput
+		return nil, ErrInvalidInput
+	}
+	if status != "" && !isValidPayoutStatus(status) {
+		return nil, ErrInvalidInput
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, provider_id, amount_irr, status, external_transfer_reference, admin_note, created_at, updated_at
-		FROM payout_requests WHERE id > $1
-		ORDER BY id LIMIT $2
-	`, after, limit+1)
+		SELECT p.id, p.provider_id, p.amount_irr, p.status, p.external_transfer_reference, p.admin_note, p.created_at, p.updated_at,
+		       pp.display_name
+		FROM payout_requests p
+		JOIN provider_profiles pp ON pp.provider_id = p.provider_id
+		WHERE ($1 = 0 OR p.id > $1) AND ($2 = '' OR p.status = $2)
+		ORDER BY p.id LIMIT $3
+	`, after, status, limit+1)
 	if err != nil {
-		return nil, false, fmt.Errorf("list payout requests: %w", err)
+		return nil, fmt.Errorf("list payout requests: %w", err)
 	}
 	defer rows.Close()
-	items := make([]Request, 0, limit)
+	items := make([]AdminPayout, 0, limit)
 	for rows.Next() {
-		item, err := scanRequest(rows)
-		if err != nil {
-			return nil, false, err
+		var item AdminPayout
+		var reference *string
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.AmountIRR, &item.Status, &reference, &item.AdminNote, &item.CreatedAt, &item.UpdatedAt, &item.ProviderDisplayName); err != nil {
+			return nil, err
 		}
-		items = append(items, *item)
+		item.ExternalTransferReference = reference
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	more := len(items) > limit
-	if more {
+	page := AdminPayoutPage{Items: items}
+	if len(items) > limit {
 		items = items[:limit]
+		page.Items = items
+		if len(items) > 0 {
+			cursor := items[len(items)-1].ID
+			page.NextCursor = &cursor
+		}
 	}
-	return items, more, nil
+	return &page, nil
+}
+
+func isValidPayoutStatus(status string) bool {
+	switch status {
+	case StatusRequested, StatusApproved, StatusProcessing, StatusPaid, StatusRejected, StatusFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 // Approve moves a requested payout to approved without touching funds.

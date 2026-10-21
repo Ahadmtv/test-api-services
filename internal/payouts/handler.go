@@ -33,6 +33,7 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers .
 	adminGroup := app.Group("/api/v1/admin/payouts")
 	adminGroup.Use(auth.Authenticator(accessTokenSecret, resolvers...))
 	adminGroup.Use(auth.RequireRoles("admin"))
+	adminGroup.Get("/", h.AdminList)
 	adminGroup.Post("/:payoutID/approve", adminAction(h.service.Approve))
 	adminGroup.Post("/:payoutID/reject", adminAction(h.service.Reject))
 	adminGroup.Post("/:payoutID/processing", adminAction(h.service.StartProcessing))
@@ -86,6 +87,24 @@ func (h *Handler) List(c fiber.Ctx) error {
 		return payoutError(err)
 	}
 	return c.JSON(payoutPage(items, more))
+}
+
+// AdminList returns every payout request for administrators, optionally
+// filtered by status, with the provider display name resolved.
+func (h *Handler) AdminList(c fiber.Ctx) error {
+	after, limit, err := pageParams(c)
+	if err != nil {
+		return err
+	}
+	status := strings.TrimSpace(c.Query("status"))
+	if status != "" && !isValidPayoutStatus(status) {
+		return platform.NewAppError("invalid_status", "وضعیت درخواست تسویه نامعتبر است", 400, nil)
+	}
+	page, err := h.service.ListAll(c.Context(), after, limit, status)
+	if err != nil {
+		return payoutError(err)
+	}
+	return c.JSON(page)
 }
 
 func pageParams(c fiber.Ctx) (int64, int, error) {

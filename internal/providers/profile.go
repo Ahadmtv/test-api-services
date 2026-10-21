@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -128,4 +129,73 @@ func (s *Service) Put(ctx context.Context, providerID int64, displayName, descri
 		return nil, fmt.Errorf("save provider profile: %w", err)
 	}
 	return &profile, nil
+}
+
+// AdminProfile is the administrator view of a provider profile with the
+// owner's safe contact details; it never exposes internal credentials.
+type AdminProfile struct {
+	ProviderID         int64     `json:"provider_id"`
+	DisplayName        string    `json:"display_name"`
+	VerificationStatus string    `json:"verification_status"`
+	IsActive           bool      `json:"is_active"`
+	OwnerEmail         string    `json:"owner_email"`
+	OwnerPhone         *string   `json:"owner_phone"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type AdminProfilePage struct {
+	Items      []AdminProfile `json:"items"`
+	NextCursor *int64         `json:"next_cursor"`
+}
+
+// AdminList returns every provider profile for administrators with keyset
+// pagination, an optional verification_status filter and a text search over
+// display name, owner email and owner phone.
+func (s *Service) AdminList(ctx context.Context, after int64, limit int, verificationStatus, query string) (*AdminProfilePage, error) {
+	if after < 0 || limit < 1 || limit > 100 {
+		return nil, ErrInvalidProfile
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT pp.provider_id, pp.display_name, pp.verification_status, pp.is_active,
+		       u.email, u.phone, pp.created_at, pp.updated_at
+		FROM provider_profiles pp
+		JOIN users u ON u.id = pp.provider_id
+		WHERE ($1 = 0 OR pp.provider_id > $1)
+		  AND ($2 = '' OR pp.verification_status = $2)
+		  AND ($3 = '' OR pp.display_name ILIKE '%' || $3 || '%'
+		       OR u.email ILIKE '%' || $3 || '%'
+		       OR COALESCE(u.phone, '') ILIKE '%' || $3 || '%')
+		ORDER BY pp.provider_id LIMIT $4
+	`, after, verificationStatus, query, limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("list provider profiles for admin: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]AdminProfile, 0, limit)
+	for rows.Next() {
+		var item AdminProfile
+		var phone sql.NullString
+		if err := rows.Scan(&item.ProviderID, &item.DisplayName, &item.VerificationStatus, &item.IsActive, &item.OwnerEmail, &phone, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan provider profile for admin: %w", err)
+		}
+		if phone.Valid {
+			item.OwnerPhone = &phone.String
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate provider profiles for admin: %w", err)
+	}
+	page := AdminProfilePage{Items: items}
+	if len(items) > limit {
+		items = items[:limit]
+		page.Items = items
+		if len(items) > 0 {
+			cursor := items[len(items)-1].ProviderID
+			page.NextCursor = &cursor
+		}
+	}
+	return &page, nil
 }

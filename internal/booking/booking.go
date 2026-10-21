@@ -3,6 +3,7 @@ package booking
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -350,6 +351,111 @@ func (s *Store) ListClient(ctx context.Context, clientID, after int64, limit int
 
 func (s *Store) ListProvider(ctx context.Context, providerID, after int64, limit int) ([]Booking, bool, error) {
 	return s.list(ctx, `provider_id = $1`, providerID, after, limit)
+}
+
+// AdminBookingListItem is the administrator view of a booking with the
+// client contact, provider display name and dispute/refund indicators.
+type AdminBookingListItem struct {
+	ID                  int64     `json:"id"`
+	Status              string    `json:"status"`
+	ServiceName         string    `json:"service_name"`
+	StartsAt            time.Time `json:"starts_at"`
+	EndsAt              time.Time `json:"ends_at"`
+	PriceIRR            int64     `json:"price_irr"`
+	PaymentMethod       string    `json:"payment_method"`
+	ClientEmail         string    `json:"client_email"`
+	ClientPhone         *string   `json:"client_phone"`
+	ProviderDisplayName string    `json:"provider_display_name"`
+	HasOpenDispute      bool      `json:"has_open_dispute"`
+	Refundable          bool      `json:"refundable"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type AdminBookingPage struct {
+	Items      []AdminBookingListItem `json:"items"`
+	NextCursor *int64                 `json:"next_cursor"`
+}
+
+// AdminListFilter narrows the administrator booking list. RefundableOnly
+// selects completed bookings whose settled hold has not been refunded.
+type AdminListFilter struct {
+	After          int64
+	Limit          int
+	Status         string
+	Query          string
+	RefundableOnly bool
+}
+
+// refundableHoldPredicate matches settled booking holds that have not been
+// refunded yet; it is shared by the refundable filter and the item flag.
+const refundableHoldPredicate = `EXISTS (
+	SELECT 1 FROM wallet_holds wh
+	WHERE wh.booking_id = b.id AND wh.status = 'settled'
+	AND NOT EXISTS (
+		SELECT 1 FROM wallet_holds refunded
+		WHERE refunded.booking_id = b.id AND refunded.status = 'refunded'
+	)
+)`
+
+// ListAdmin returns bookings across all users for administrators with keyset
+// pagination, optional status and text filters, and a refundable-only view.
+func (s *Store) ListAdmin(ctx context.Context, filter AdminListFilter) (*AdminBookingPage, error) {
+	if filter.After < 0 || filter.Limit < 1 || filter.Limit > 100 {
+		return nil, ErrInvalidInput
+	}
+	refundableFilter := ""
+	if filter.RefundableOnly {
+		refundableFilter = `AND b.status = 'completed' AND ` + refundableHoldPredicate
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT b.id, b.status, b.service_name, b.starts_at, b.ends_at, b.price_irr, b.payment_method,
+		       u.email, u.phone, pp.display_name, b.created_at,
+		       EXISTS (
+		      	SELECT 1 FROM booking_disputes d
+		      	WHERE d.booking_id = b.id AND d.resolved_at IS NULL
+		       ) AS has_open_dispute,
+		       (b.status = 'completed' AND `+refundableHoldPredicate+`) AS refundable
+		FROM bookings b
+		JOIN users u ON u.id = b.client_id
+		JOIN provider_profiles pp ON pp.provider_id = b.provider_id
+		WHERE ($1 = 0 OR b.id > $1)
+		  AND ($2 = '' OR b.status = $2)
+		  AND ($3 = '' OR b.service_name ILIKE '%' || $3 || '%'
+		       OR u.email ILIKE '%' || $3 || '%'
+		       OR pp.display_name ILIKE '%' || $3 || '%')
+		  `+refundableFilter+`
+		ORDER BY b.id LIMIT $4
+	`, filter.After, filter.Status, filter.Query, filter.Limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("list bookings for admin: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]AdminBookingListItem, 0, filter.Limit)
+	for rows.Next() {
+		var item AdminBookingListItem
+		var phone sql.NullString
+		if err := rows.Scan(&item.ID, &item.Status, &item.ServiceName, &item.StartsAt, &item.EndsAt, &item.PriceIRR, &item.PaymentMethod, &item.ClientEmail, &phone, &item.ProviderDisplayName, &item.CreatedAt, &item.HasOpenDispute, &item.Refundable); err != nil {
+			return nil, fmt.Errorf("scan booking for admin: %w", err)
+		}
+		if phone.Valid {
+			item.ClientPhone = &phone.String
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate bookings for admin: %w", err)
+	}
+	page := AdminBookingPage{Items: items}
+	if len(items) > filter.Limit {
+		items = items[:filter.Limit]
+		page.Items = items
+		if len(items) > 0 {
+			cursor := items[len(items)-1].ID
+			page.NextCursor = &cursor
+		}
+	}
+	return &page, nil
 }
 
 func (s *Store) list(ctx context.Context, predicate string, actorID, after int64, limit int) ([]Booking, bool, error) {

@@ -33,15 +33,16 @@ var serviceCategories = []string{
 }
 
 type ServiceItem struct {
-	ID              int64  `json:"id"`
-	ProviderID      int64  `json:"provider_id"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	Category        string `json:"category"`
-	DurationMinutes int    `json:"duration_minutes"`
-	PriceIRR        int64  `json:"price_irr"`
-	BufferMinutes   int    `json:"buffer_minutes"`
-	IsActive        bool   `json:"is_active"`
+	ID                  int64  `json:"id"`
+	ProviderID          int64  `json:"provider_id"`
+	Name                string `json:"name"`
+	Description         string `json:"description"`
+	Category            string `json:"category"`
+	DurationMinutes     int    `json:"duration_minutes"`
+	PriceIRR            int64  `json:"price_irr"`
+	BufferMinutes       int    `json:"buffer_minutes"`
+	IsActive            bool   `json:"is_active"`
+	ProviderDisplayName string `json:"provider_display_name"`
 }
 
 type CreateInput struct {
@@ -119,9 +120,10 @@ func (s *Store) Create(ctx context.Context, providerID int64, input CreateInput)
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO services (provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active
+		RETURNING id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active,
+			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = services.provider_id)
 	`, providerID, validated.Name, validated.Description, validated.Category, validated.DurationMinutes, validated.PriceIRR, validated.BufferMinutes, validated.IsActive).
-		Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive)
+		Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName)
 	if err != nil {
 		return nil, fmt.Errorf("create service: %w", err)
 	}
@@ -130,7 +132,7 @@ func (s *Store) Create(ctx context.Context, providerID int64, input CreateInput)
 
 func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 	item, err := scanService(s.pool.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.is_active AND p.is_active AND p.verification_status = 'verified'
@@ -146,7 +148,7 @@ func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 
 func (s *Store) GetPublicForProvider(ctx context.Context, providerID, serviceID int64) (*ServiceItem, error) {
 	item, err := scanService(s.pool.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
@@ -173,7 +175,7 @@ func (s *Store) BookingProviderIDTx(ctx context.Context, tx pgx.Tx, serviceID in
 
 func (s *Store) GetForBookingTx(ctx context.Context, tx pgx.Tx, providerID, serviceID int64) (*ServiceItem, error) {
 	item, err := scanService(tx.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
@@ -199,7 +201,7 @@ func (s *Store) ListOwned(ctx context.Context, providerID, after int64, limit in
 
 func (s *Store) list(ctx context.Context, providerID *int64, category string, after int64, limit int) ([]ServiceItem, bool, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id > $1 AND ($2::bigint IS NULL OR s.provider_id = $2)
@@ -215,7 +217,7 @@ func (s *Store) list(ctx context.Context, providerID *int64, category string, af
 	items := make([]ServiceItem, 0, limit)
 	for rows.Next() {
 		var item ServiceItem
-		if err := rows.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName); err != nil {
 			return nil, false, err
 		}
 		items = append(items, item)
@@ -252,8 +254,9 @@ func (s *Store) Update(ctx context.Context, providerID, serviceID int64, input U
 	defer tx.Rollback(ctx)
 
 	item, err := scanService(tx.QueryRow(ctx, `
-		SELECT id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active
-		FROM services WHERE id = $1 AND provider_id = $2 FOR UPDATE
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active,
+			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = s.provider_id)
+		FROM services s WHERE s.id = $1 AND s.provider_id = $2 FOR UPDATE
 	`, serviceID, providerID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrServiceNotFound
@@ -304,7 +307,7 @@ func (s *Store) Update(ctx context.Context, providerID, serviceID int64, input U
 
 func scanService(row pgx.Row) (*ServiceItem, error) {
 	var item ServiceItem
-	err := row.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive)
+	err := row.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName)
 	if err != nil {
 		return nil, err
 	}

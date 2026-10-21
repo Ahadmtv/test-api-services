@@ -50,8 +50,54 @@ func (h *Handler) Register(app *fiber.App, accessTokenSecret string, resolvers .
 
 	admin := app.Group("/api/v1/admin")
 	admin.Use(auth.Authenticator(accessTokenSecret, resolvers...), auth.RequireRoles("admin"))
+	admin.Get("/bookings", h.AdminList)
 	admin.Post("/bookings/:bookingID/refund", h.Refund)
 	admin.Post("/bookings/:bookingID/dispute-resolution", h.ResolveDispute)
+}
+
+// adminBookingStatuses enumerates the booking statuses accepted by the
+// administrator booking list filter.
+var adminBookingStatuses = map[string]bool{
+	"pending_payment": true, "pending_provider_acceptance": true,
+	"confirmed": true, "in_progress": true, "completion_pending": true,
+	"disputed": true, "completed": true, "cancelled": true, "expired": true,
+}
+
+// AdminList returns bookings across all users for administrators with
+// keyset pagination, status and text filters, and a refundable-only view.
+func (h *Handler) AdminList(c fiber.Ctx) error {
+	after, limit, err := bookingPageParams(c)
+	if err != nil {
+		return err
+	}
+	filter := AdminListFilter{After: after, Limit: limit}
+	if status := strings.TrimSpace(c.Query("status")); status != "" {
+		if !adminBookingStatuses[status] {
+			return platform.NewAppError("invalid_status", "وضعیت رزرو نامعتبر است", 400, nil)
+		}
+		filter.Status = status
+	}
+	if query := strings.TrimSpace(c.Query("q")); query != "" {
+		if len([]rune(query)) > 100 {
+			query = string([]rune(query)[:100])
+		}
+		filter.Query = query
+	}
+	switch strings.TrimSpace(c.Query("refundable")) {
+	case "":
+	case "true":
+		filter.RefundableOnly = true
+	default:
+		return platform.NewAppError("invalid_refundable", "مقدار فیلتر بازپرداخت نامعتبر است", 400, nil)
+	}
+	page, err := h.service.ListAdmin(c.Context(), filter)
+	if err != nil {
+		if errors.Is(err, ErrInvalidInput) {
+			return invalidBookingRequest()
+		}
+		return platform.Unexpected(err)
+	}
+	return c.JSON(page)
 }
 
 type createRequest struct {
