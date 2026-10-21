@@ -584,6 +584,12 @@ func TestAdminBookingListAPI(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings?refundable=false", adminToken, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("refundable=false filter status=%d, want 200 per OpenAPI boolean", resp.StatusCode)
+	}
+	resp.Body.Close()
+
 	resp = bookingRequest(t, app, http.MethodGet, "/api/v1/admin/bookings", adminToken, "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("admin booking list status=%d, want 200", resp.StatusCode)

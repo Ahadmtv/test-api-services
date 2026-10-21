@@ -87,6 +87,7 @@ func (h *Handler) AdminList(c fiber.Ctx) error {
 	case "":
 	case "true":
 		filter.RefundableOnly = true
+	case "false":
 	default:
 		return platform.NewAppError("invalid_refundable", "مقدار فیلتر بازپرداخت نامعتبر است", 400, nil)
 	}
