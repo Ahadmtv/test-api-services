@@ -505,7 +505,7 @@ paths:
   /api/v1/admin/providers/{providerID}/verification:
     patch:
       summary: تغییر وضعیت تأیید ارائه‌دهنده
-      description: فقط مدیر می‌تواند وضعیت تأیید نمایه را به pending، verified یا rejected تغییر دهد. تأیید (verified) بدون تکمیل نشدن نمایه با خطای 409 با کد profile_incomplete رد می‌شود.
+      description: فقط مدیر می‌تواند وضعیت تأیید نمایه را به pending، verified یا rejected تغییر دهد. تأیید (verified) پیش از تکمیل نمایه با خطای 409 و کد profile_incomplete رد می‌شود.
       security:
         - bearerAuth: []
       parameters:
