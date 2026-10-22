@@ -31,3 +31,6 @@ coverage.html
 
 # local config
 builder.config.json
+
+# local debug tools (never commit: secrets on the command line)
+tmp_mint/
