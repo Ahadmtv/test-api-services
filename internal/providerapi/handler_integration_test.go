@@ -74,12 +74,18 @@ func TestStage03APIIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('other@example.test', 'x') RETURNING id`).Scan(&otherID); err != nil {
 		t.Fatalf("create other provider: %v", err)
 	}
-	for _, id := range []int64{ownerID, otherID} {
-		if _, err := pool.Exec(ctx, `INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status) VALUES ($1, 'Provider', TRUE, 'verified')`, id); err != nil {
-			t.Fatalf("create profile %d: %v", id, err)
+	for _, profile := range []struct {
+		id   int64
+		name string
+	}{
+		{ownerID, "Owner Provider"},
+		{otherID, "Other Provider"},
+	} {
+		if _, err := pool.Exec(ctx, `INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status) VALUES ($1, $2, TRUE, 'verified')`, profile.id, profile.name); err != nil {
+			t.Fatalf("create profile %d: %v", profile.id, err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, id); err != nil {
-			t.Fatalf("grant provider role %d: %v", id, err)
+		if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, profile.id); err != nil {
+			t.Fatalf("grant provider role %d: %v", profile.id, err)
 		}
 	}
 	var ownerServiceID, otherServiceID int64
@@ -177,16 +183,46 @@ func TestStage03APIIntegration(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("filter public services by category status = %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read filtered services: %v", err)
+	}
+	resp.Body.Close()
 	var filtered struct {
 		Items []catalog.ServiceItem `json:"items"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&filtered); err != nil {
+	if err := json.Unmarshal(body, &filtered); err != nil {
 		t.Fatalf("decode filtered services: %v", err)
 	}
-	resp.Body.Close()
 	if len(filtered.Items) != 1 || filtered.Items[0].ID != otherServiceID {
 		t.Fatalf("filtered services = %+v, want only service %d", filtered.Items, otherServiceID)
 	}
+	if filtered.Items[0].ProviderDisplayName != "Other Provider" {
+		t.Fatalf("public list provider_display_name = %q, want Other Provider", filtered.Items[0].ProviderDisplayName)
+	}
+	if filtered.Items[0].Name != "Updated service" {
+		t.Fatalf("public list service name = %q, want Updated service", filtered.Items[0].Name)
+	}
+	assertPublicServiceHidesPrivateFields(t, body)
+
+	resp = doRequest(t, app, http.MethodGet, "/api/v1/services/"+jsonNumber(otherServiceID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public service detail status = %d", resp.StatusCode)
+	}
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read public service detail: %v", err)
+	}
+	resp.Body.Close()
+	var publicDetail catalog.ServiceItem
+	if err := json.Unmarshal(body, &publicDetail); err != nil {
+		t.Fatalf("decode public service detail: %v", err)
+	}
+	if publicDetail.ProviderDisplayName != "Other Provider" {
+		t.Fatalf("public detail provider_display_name = %q, want Other Provider", publicDetail.ProviderDisplayName)
+	}
+	assertPublicServiceHidesPrivateFields(t, body)
+
 	resp = doRequest(t, app, http.MethodGet, "/api/v1/services?category=dermatology", "", "")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("medical category filter status = %d, want 400", resp.StatusCode)
@@ -549,4 +585,14 @@ func jsonNumber(value int64) string {
 
 func nilLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func assertPublicServiceHidesPrivateFields(t *testing.T, body []byte) {
+	t.Helper()
+	payload := string(body)
+	for _, field := range []string{"owner_email", "owner_phone", "email", "phone", "password_hash"} {
+		if strings.Contains(payload, `"`+field+`"`) {
+			t.Errorf("public service response exposes private field %q: %s", field, payload)
+		}
+	}
 }

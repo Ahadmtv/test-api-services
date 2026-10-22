@@ -1443,7 +1443,7 @@ components:
         - other
     Service:
       type: object
-      required: [id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active]
+      required: [id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active, provider_display_name]
       properties:
         id: { type: integer, format: int64 }
         provider_id: { type: integer, format: int64 }
@@ -1458,7 +1458,7 @@ components:
         provider_display_name:
           type: string
           maxLength: 160
-          description: نام نمایشی ارائه‌دهنده خدمت؛ برای نمایش در فهرست عمومی
+          description: نام نمایشی ارائه‌دهنده خدمت؛ برای نمایش در فهرست عمومی. مقدار خالی یعنی نمایه ارائه‌دهنده هنوز تکمیل نشده است.
     ServiceInput:
       type: object
       required: [name, duration_minutes, price_irr]

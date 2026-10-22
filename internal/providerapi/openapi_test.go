@@ -24,6 +24,23 @@ func TestOpenAPI3ContractIncludesBeautyServiceCategory(t *testing.T) {
 	}
 }
 
+func TestOpenAPI3ServiceRequiresProviderDisplayName(t *testing.T) {
+	data, err := os.ReadFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("read OpenAPI contract: %v", err)
+	}
+	spec := string(data)
+	for _, needle := range []string{
+		"required: [id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active, provider_display_name]",
+		"provider_display_name:\n",
+		"مقدار خالی یعنی نمایه ارائه‌دهنده هنوز تکمیل نشده است.",
+	} {
+		if !strings.Contains(spec, needle) {
+			t.Errorf("OpenAPI Service contract is missing provider display name marker %q", needle)
+		}
+	}
+}
+
 func TestOpenAPI3ContractIncludesStage03Operations(t *testing.T) {
 	data, err := os.ReadFile("../../api/openapi.yaml")
 	if err != nil {
