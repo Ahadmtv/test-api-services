@@ -78,6 +78,9 @@ func TestStage03APIIntegration(t *testing.T) {
 		if _, err := pool.Exec(ctx, `INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status) VALUES ($1, 'Provider', TRUE, 'verified')`, id); err != nil {
 			t.Fatalf("create profile %d: %v", id, err)
 		}
+		if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, id); err != nil {
+			t.Fatalf("grant provider role %d: %v", id, err)
+		}
 	}
 	var ownerServiceID, otherServiceID int64
 	if err := pool.QueryRow(ctx, `INSERT INTO services (provider_id, name, category, duration_minutes, price_irr) VALUES ($1, 'Owned service', 'haircut', 30, 10000) RETURNING id`, ownerID).Scan(&ownerServiceID); err != nil {
@@ -342,7 +345,7 @@ func TestAdminProviderListAPI(t *testing.T) {
 		t.Fatalf("migrate test schema: %v", err)
 	}
 
-	var p1ID, p2ID, clientID int64
+	var p1ID, p2ID, clientID, incompleteID int64
 	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('first@example.test', 'x') RETURNING id`).Scan(&p1ID); err != nil {
 		t.Fatalf("create first provider: %v", err)
 	}
@@ -352,6 +355,12 @@ func TestAdminProviderListAPI(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('client@example.test', 'x') RETURNING id`).Scan(&clientID); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('incomplete@example.test', 'x') RETURNING id`).Scan(&incompleteID); err != nil {
+		t.Fatalf("create incomplete provider: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, incompleteID); err != nil {
+		t.Fatalf("grant provider role: %v", err)
+	}
 	for _, row := range []struct {
 		id     int64
 		name   string
@@ -359,6 +368,7 @@ func TestAdminProviderListAPI(t *testing.T) {
 	}{
 		{p1ID, "Alpha Salon", "pending"},
 		{p2ID, "Beta Studio", "verified"},
+		{incompleteID, "", "pending"},
 	} {
 		if _, err := pool.Exec(ctx, `INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status) VALUES ($1, $2, TRUE, $3)`, row.id, row.name, row.status); err != nil {
 			t.Fatalf("create profile %d: %v", row.id, err)
@@ -378,6 +388,7 @@ func TestAdminProviderListAPI(t *testing.T) {
 		ProviderID         int64  `json:"provider_id"`
 		DisplayName        string `json:"display_name"`
 		VerificationStatus string `json:"verification_status"`
+		ProfileCompleted   bool   `json:"profile_completed"`
 		OwnerEmail         string `json:"owner_email"`
 	}
 	type adminProviderPage struct {
@@ -411,17 +422,41 @@ func TestAdminProviderListAPI(t *testing.T) {
 	}
 	resp.Body.Close()
 	if page.NextCursor != nil {
-		t.Fatalf("two profiles cannot produce next cursor, got %d", *page.NextCursor)
+		t.Fatalf("three profiles cannot produce next cursor, got %d", *page.NextCursor)
 	}
-	if len(page.Items) != 2 {
-		t.Fatalf("admin sees %d providers, want 2", len(page.Items))
+	if len(page.Items) != 3 {
+		t.Fatalf("admin sees %d providers, want 3", len(page.Items))
 	}
-	if page.Items[0].OwnerEmail != "first@example.test" || page.Items[0].VerificationStatus != "pending" {
+	if page.Items[0].OwnerEmail != "first@example.test" || page.Items[0].VerificationStatus != "pending" || !page.Items[0].ProfileCompleted {
 		t.Fatalf("admin provider item[0]=%+v", page.Items[0])
 	}
 	if page.Items[1].DisplayName != "Beta Studio" || page.Items[1].VerificationStatus != "verified" {
 		t.Fatalf("admin provider item[1]=%+v", page.Items[1])
 	}
+	if page.Items[2].DisplayName != "" || page.Items[2].ProfileCompleted || page.Items[2].OwnerEmail != "incomplete@example.test" {
+		t.Fatalf("incomplete provider item[2]=%+v, want empty name with email fallback and profile_completed=false", page.Items[2])
+	}
+
+	patchBody := func(status string) string { return `{"verification_status":"` + status + `"}` }
+	resp = doRequest(t, app, http.MethodPatch, "/api/v1/admin/providers/"+jsonNumber(incompleteID)+"/verification", adminToken, patchBody("verified"))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("verify incomplete profile status = %d, want 409", resp.StatusCode)
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode verify problem: %v", err)
+	}
+	resp.Body.Close()
+	if problem.Code != "profile_incomplete" {
+		t.Fatalf("verify incomplete problem code = %q, want profile_incomplete", problem.Code)
+	}
+	resp = doRequest(t, app, http.MethodPatch, "/api/v1/admin/providers/"+jsonNumber(incompleteID)+"/verification", adminToken, patchBody("pending"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pending verification on incomplete profile status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
 
 	resp = doRequest(t, app, http.MethodGet, "/api/v1/admin/providers?verification_status=verified", adminToken, "")
 	var verified adminProviderPage

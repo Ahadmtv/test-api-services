@@ -505,7 +505,7 @@ paths:
   /api/v1/admin/providers/{providerID}/verification:
     patch:
       summary: تغییر وضعیت تأیید ارائه‌دهنده
-      description: فقط مدیر می‌تواند وضعیت تأیید نمایه را به pending، verified یا rejected تغییر دهد.
+      description: فقط مدیر می‌تواند وضعیت تأیید نمایه را به pending، verified یا rejected تغییر دهد. تأیید (verified) بدون تکمیل نشدن نمایه با خطای 409 با کد profile_incomplete رد می‌شود.
       security:
         - bearerAuth: []
       parameters:
@@ -542,6 +542,9 @@ paths:
           $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+          description: نمایه ناتمام است (profile_incomplete)
   /api/v1/providers/{providerID}/availability:
     get:
       summary: در دسترس بودن زمان‌ها برای ارائه‌دهنده و خدمت
@@ -1351,14 +1354,17 @@ components:
         granted: { type: boolean }
     AdminProvider:
       type: object
-      required: [provider_id, display_name, verification_status, is_active, owner_email, created_at, updated_at]
+      required: [provider_id, display_name, verification_status, is_active, profile_completed, owner_email, created_at, updated_at]
       properties:
         provider_id: { type: integer, format: int64 }
-        display_name: { type: string, maxLength: 160 }
+        display_name: { type: string, maxLength: 160, description: تا تکمیل نمایه ممکن است خالی باشد }
         verification_status:
           type: string
           enum: [pending, verified, rejected]
         is_active: { type: boolean }
+        profile_completed:
+          type: boolean
+          description: درست یعنی نام نمایشی نمایه پر شده و ارائه‌دهنده قابل تأیید است
         owner_email: { type: string, format: email, description: از contact مالک حساب ارائه‌دهنده؛ فقط برای مدیر }
         owner_phone:
           type: [string, 'null']

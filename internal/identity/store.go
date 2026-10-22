@@ -35,6 +35,7 @@ type Store interface {
 	ListAdminUsers(ctx context.Context, after int64, limit int, query, role string) ([]AdminUser, bool, error)
 	GetUserForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserRecord, error)
 	SetRole(ctx context.Context, tx pgx.Tx, userID int64, role string, granted bool) (bool, error)
+	EnsureProviderProfile(ctx context.Context, tx pgx.Tx, userID int64) (bool, error)
 	LockAdminRoleChanges(ctx context.Context, tx pgx.Tx) error
 	CountOtherActiveAdmins(ctx context.Context, tx pgx.Tx, userID int64) (int, error)
 	InsertAuditEvent(ctx context.Context, tx pgx.Tx, actorID, targetID int64, action, requestID string, metadata map[string]any) error
@@ -406,6 +407,18 @@ func (s *pgxStore) SetRole(ctx context.Context, tx pgx.Tx, userID int64, role st
 	result, err := tx.Exec(ctx, `DELETE FROM user_roles WHERE user_id = $1 AND role = $2`, userID, role)
 	if err != nil {
 		return false, fmt.Errorf("revoke role: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+func (s *pgxStore) EnsureProviderProfile(ctx context.Context, tx pgx.Tx, userID int64) (bool, error) {
+	result, err := tx.Exec(ctx, `
+		INSERT INTO provider_profiles (provider_id, display_name, is_active, verification_status)
+		VALUES ($1, '', false, 'pending')
+		ON CONFLICT (provider_id) DO NOTHING
+	`, userID)
+	if err != nil {
+		return false, fmt.Errorf("ensure provider profile: %w", err)
 	}
 	return result.RowsAffected() == 1, nil
 }

@@ -130,3 +130,84 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Fatalf("reapply latest migration: %v", err)
 	}
 }
+
+func TestProviderProfileBackfillIntegration(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL is not set; skipping provider profile backfill integration test")
+	}
+
+	ctx := context.Background()
+	adminPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to database: %v", err)
+	}
+	defer adminPool.Close()
+
+	schemaBytes := make([]byte, 8)
+	if _, err := rand.Read(schemaBytes); err != nil {
+		t.Fatalf("generate test schema: %v", err)
+	}
+	schema := "backfill_test_" + hex.EncodeToString(schemaBytes)
+	if _, err := adminPool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	defer adminPool.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+
+	poolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatalf("connect to test schema: %v", err)
+	}
+	defer pool.Close()
+
+	migrator, err := NewMigrator(pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("create migrator: %v", err)
+	}
+	if err := migrator.Up(ctx); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	var userID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('ahahaja@example.test', 'x') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("create provider user: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, userID); err != nil {
+		t.Fatalf("grant provider role: %v", err)
+	}
+
+	backfill, err := fs.ReadFile(migrations.FS, "0015_provider_profile_backfill.up.sql")
+	if err != nil {
+		t.Fatalf("read backfill migration: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := pool.Exec(ctx, string(backfill)); err != nil {
+			t.Fatalf("run backfill pass %d: %v", i+1, err)
+		}
+	}
+
+	var (
+		count       int
+		displayName string
+		timeZone    string
+		isActive    bool
+		status      string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(display_name), min(time_zone), bool_or(is_active), min(verification_status)
+		FROM provider_profiles WHERE provider_id = $1
+	`, userID).Scan(&count, &displayName, &timeZone, &isActive, &status); err != nil {
+		t.Fatalf("load backfilled profile: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("backfilled profiles = %d, want exactly 1 after three passes", count)
+	}
+	if displayName != "" || timeZone != "Asia/Tehran" || isActive || status != "pending" {
+		t.Fatalf("backfilled profile=(%q,%q,%v,%q), want ('','Asia/Tehran',false,pending)", displayName, timeZone, isActive, status)
+	}
+}

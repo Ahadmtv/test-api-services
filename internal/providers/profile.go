@@ -24,6 +24,7 @@ type Profile struct {
 
 var ErrProfileNotFound = errors.New("provider profile not found")
 var ErrInvalidProfile = errors.New("invalid provider profile")
+var ErrProfileIncomplete = errors.New("provider profile incomplete")
 
 type Service struct {
 	pool *pgxpool.Pool
@@ -85,6 +86,19 @@ func (s *Service) SetVerificationStatus(ctx context.Context, actorID, providerID
 		return nil, fmt.Errorf("begin provider verification: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	var displayName string
+	err = tx.QueryRow(ctx, `
+		SELECT display_name FROM provider_profiles WHERE provider_id = $1 FOR UPDATE
+	`, providerID).Scan(&displayName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock provider profile for verification: %w", err)
+	}
+	if status == "verified" && strings.TrimSpace(displayName) == "" {
+		return nil, ErrProfileIncomplete
+	}
 	var profile Profile
 	err = tx.QueryRow(ctx, `
 		UPDATE provider_profiles SET verification_status = $1, updated_at = now()
@@ -138,6 +152,7 @@ type AdminProfile struct {
 	DisplayName        string    `json:"display_name"`
 	VerificationStatus string    `json:"verification_status"`
 	IsActive           bool      `json:"is_active"`
+	ProfileCompleted   bool      `json:"profile_completed"`
 	OwnerEmail         string    `json:"owner_email"`
 	OwnerPhone         *string   `json:"owner_phone"`
 	CreatedAt          time.Time `json:"created_at"`
@@ -158,7 +173,7 @@ func (s *Service) AdminList(ctx context.Context, after int64, limit int, verific
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT pp.provider_id, pp.display_name, pp.verification_status, pp.is_active,
-		       u.email, u.phone, pp.created_at, pp.updated_at
+		       btrim(pp.display_name) <> '', u.email, u.phone, pp.created_at, pp.updated_at
 		FROM provider_profiles pp
 		JOIN users u ON u.id = pp.provider_id
 		WHERE ($1 = 0 OR pp.provider_id > $1)
@@ -177,7 +192,7 @@ func (s *Service) AdminList(ctx context.Context, after int64, limit int, verific
 	for rows.Next() {
 		var item AdminProfile
 		var phone sql.NullString
-		if err := rows.Scan(&item.ProviderID, &item.DisplayName, &item.VerificationStatus, &item.IsActive, &item.OwnerEmail, &phone, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ProviderID, &item.DisplayName, &item.VerificationStatus, &item.IsActive, &item.ProfileCompleted, &item.OwnerEmail, &phone, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan provider profile for admin: %w", err)
 		}
 		if phone.Valid {

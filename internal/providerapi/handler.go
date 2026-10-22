@@ -440,6 +440,8 @@ func profileError(err error) error {
 		return platform.NewAppError("provider_profile_not_found", "نمایه ارائه‌دهنده یافت نشد", 404, nil)
 	case errors.Is(err, providers.ErrInvalidProfile):
 		return platform.NewAppError("invalid_provider_profile", "اطلاعات نمایه ارائه‌دهنده نامعتبر است", 400, nil)
+	case errors.Is(err, providers.ErrProfileIncomplete):
+		return platform.NewAppError("profile_incomplete", "ارائه‌دهنده هنوز نمایه خود را تکمیل نکرده است", 409, nil)
 	default:
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "provider_profiles_time_zone_booking_guard" {

@@ -1,4 +1,4 @@
-package e2e_test
+﻿package e2e_test
 
 import (
 	"context"
@@ -498,7 +498,7 @@ func TestFullBusinessWorkflow(t *testing.T) {
 		e.moveIntoServiceWindow(bookingID)
 		e.providerAction(bookingID, "start", "start disputed booking")
 		e.providerAction(bookingID, "request-completion", "request disputed completion")
-		e.clientAction(bookingID, "dispute", `{"reason":"کیفیت خدمت مطابق توافق نبود"}`, "dispute booking")
+		e.clientAction(bookingID, "dispute", `{"reason":"ÃšÂ©Ã›Å’Ã™ÂÃ›Å’Ã˜Âª Ã˜Â®Ã˜Â¯Ã™â€¦Ã˜Âª Ã™â€¦Ã˜Â·Ã˜Â§Ã˜Â¨Ã™â€š Ã˜ÂªÃ™Ë†Ã˜Â§Ã™ÂÃ™â€š Ã™â€ Ã˜Â¨Ã™Ë†Ã˜Â¯"}`, "dispute booking")
 		payload := e.adminAction(fmt.Sprintf("/api/v1/admin/bookings/%d/dispute-resolution", bookingID), `{"resolution":"settle"}`, "resolve dispute")
 		if state := text(t, payload, "status", "resolve dispute"); state != "completed" {
 			t.Fatalf("resolved dispute status=%q; want completed", state)
@@ -636,4 +636,158 @@ func TestGatewayMinimumRejectedBeforeSlotReservation(t *testing.T) {
 	if bookings != 0 {
 		t.Fatalf("low-price payment attempt reserved %d bookings", bookings)
 	}
+}
+
+func TestProviderOnboardingLifecycle(t *testing.T) {
+	e := setupE2E(t)
+
+	// 1) Admin grants the provider role: the auto-created profile appears in
+	// the admin verification list as incomplete.
+	status, _, raw := helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/provider", e.clientID), e.adminToken, `{"granted":true}`, "")
+	expectStatus(t, status, http.StatusOK, "grant provider role", raw)
+
+	var createdProfiles int
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM provider_profiles WHERE provider_id = $1`, e.clientID).Scan(&createdProfiles); err != nil {
+		t.Fatalf("count auto-created profiles: %v", err)
+	}
+	if createdProfiles != 1 {
+		t.Fatalf("role grant created %d provider profiles; want 1", createdProfiles)
+	}
+
+	status, listPage, raw := helperDo(t, e.app, http.MethodGet,
+		"/api/v1/admin/providers?q="+url.QueryEscape(e.clientEmail), e.adminToken, "", "")
+	expectStatus(t, status, http.StatusOK, "admin finds newly granted provider", raw)
+	listItems, ok := listPage["items"].([]any)
+	if !ok || len(listItems) != 1 {
+		t.Fatalf("admin provider search returned %v", listPage)
+	}
+	incomplete, ok := listItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("admin provider search item is not an object: %v", listItems[0])
+	}
+	if number(t, incomplete, "provider_id", "searched provider") != e.clientID {
+		t.Fatalf("admin provider search returned wrong provider: %v", listItems[0])
+	}
+	if got, _ := incomplete["profile_completed"].(bool); got {
+		t.Fatalf("newly granted provider must be incomplete: %v", incomplete)
+	}
+	verificationStatus := text(t, incomplete, "verification_status", "searched provider verification")
+	if verificationStatus != "pending" {
+		t.Fatalf("newly granted provider verification status=%q; want pending", verificationStatus)
+	}
+	if displayName := fmt.Sprint(incomplete["display_name"]); displayName != "" {
+		t.Fatalf("newly granted provider display_name=%q; want empty", displayName)
+	}
+
+	// 2) The service rejects verification of the incomplete profile.
+	status, _, raw = helperDo(t, e.app, http.MethodPatch,
+		fmt.Sprintf("/api/v1/admin/providers/%d/verification", e.clientID), e.adminToken,
+		`{"verification_status":"verified"}`, "")
+	expectStatus(t, status, http.StatusConflict, "verify incomplete profile", raw)
+	if !strings.Contains(raw, `"code":"profile_incomplete"`) {
+		t.Fatalf("verify incomplete response=%s; want profile_incomplete", raw)
+	}
+
+	// 3) The provider fills the profile, adds working hours and a service.
+	status, _, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/provider/profile", e.clientToken, "", "")
+	expectStatus(t, status, http.StatusOK, "provider loads auto-created profile", raw)
+
+	status, _, raw = helperDo(t, e.app, http.MethodPut, "/api/v1/provider/profile", e.clientToken,
+		`{"display_name":"Onboarding Salon","is_active":true,"time_zone":"Asia/Tehran"}`, "")
+	expectStatus(t, status, http.StatusOK, "complete provider profile", raw)
+
+	var intervals []string
+	for weekday := 1; weekday <= 7; weekday++ {
+		intervals = append(intervals, fmt.Sprintf(`{"weekday":%d,"opens_at":"09:00","closes_at":"20:00"}`, weekday))
+	}
+	status, _, raw = helperDo(t, e.app, http.MethodPut, "/api/v1/provider/working-hours", e.clientToken,
+		`{"intervals":[`+strings.Join(intervals, ",")+`]}`, "")
+	expectStatus(t, status, http.StatusOK, "put onboarding working hours", raw)
+
+	status, service, raw := helperDo(t, e.app, http.MethodPost, "/api/v1/provider/services", e.clientToken,
+		`{"name":"Onboarding Service","category":"haircut","duration_minutes":30,"price_irr":25000,"is_active":true}`, "")
+	expectStatus(t, status, http.StatusCreated, "create onboarding service", raw)
+	serviceID := number(t, service, "id", "create onboarding service")
+
+	// 4) Approval makes the service publicly visible.
+	status, _, raw = helperDo(t, e.app, http.MethodPatch,
+		fmt.Sprintf("/api/v1/admin/providers/%d/verification", e.clientID), e.adminToken,
+		`{"verification_status":"verified"}`, "")
+	expectStatus(t, status, http.StatusOK, "verify completed profile", raw)
+
+	status, publicList, raw := helperDo(t, e.app, http.MethodGet, "/api/v1/services?category=haircut", "", "", "")
+	expectStatus(t, status, http.StatusOK, "public services after verification", raw)
+	item, found := findService(t, publicList, serviceID)
+	if !found || item == nil {
+		t.Fatalf("public services list=%v; want service %d", publicList, serviceID)
+	}
+	status, _, raw = helperDo(t, e.app, http.MethodGet, fmt.Sprintf("/api/v1/services/%d", serviceID), "", "", "")
+	expectStatus(t, status, http.StatusOK, "public service detail", raw)
+
+	// 5) Revoking the role keeps the profile but hides it publicly and
+	// blocks new bookings.
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/provider", e.clientID), e.adminToken, `{"granted":false}`, "")
+	expectStatus(t, status, http.StatusOK, "revoke provider role", raw)
+
+	var keptProfiles int
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM provider_profiles WHERE provider_id = $1`, e.clientID).Scan(&keptProfiles); err != nil {
+		t.Fatalf("count profiles after revoke: %v", err)
+	}
+	if keptProfiles != 1 {
+		t.Fatalf("revoke removed profile; want kept (count=%d)", keptProfiles)
+	}
+
+	status, publicList, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/services?category=haircut", "", "", "")
+	expectStatus(t, status, http.StatusOK, "public services after revoke", raw)
+	if item, found := findService(t, publicList, serviceID); found || item != nil {
+		t.Fatalf("revoked provider service=%v still publicly listed", item)
+	}
+	status, _, raw = helperDo(t, e.app, http.MethodGet, fmt.Sprintf("/api/v1/services/%d", serviceID), "", "", "")
+	expectStatus(t, status, http.StatusNotFound, "public service detail after revoke", raw)
+	status, _, raw = helperDo(t, e.app, http.MethodPost, "/api/v1/bookings", e.clientToken,
+		fmt.Sprintf(`{"service_id":%d,"starts_at":%q}`, serviceID, nextSlot(t).Format(time.RFC3339)), "e2e-revoked-booking")
+	expectStatus(t, status, http.StatusNotFound, "revoked provider cannot accept new bookings", raw)
+	if !strings.Contains(raw, `"code":"service_unavailable"`) {
+		t.Fatalf("revoked provider booking response=%s", raw)
+	}
+
+	// 6) Re-granting restores visibility without resetting the profile.
+	status, _, raw = helperDo(t, e.app, http.MethodPut,
+		fmt.Sprintf("/api/v1/admin/users/%d/roles/provider", e.clientID), e.adminToken, `{"granted":true}`, "")
+	expectStatus(t, status, http.StatusOK, "re-grant provider role", raw)
+	status, publicList, raw = helperDo(t, e.app, http.MethodGet, "/api/v1/services?category=haircut", "", "", "")
+	expectStatus(t, status, http.StatusOK, "public services after re-grant", raw)
+	if item, found := findService(t, publicList, serviceID); !found || item == nil {
+		t.Fatalf("public services after re-grant=%v; want service %d visible again", publicList, serviceID)
+	}
+	var keptName string
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT display_name FROM provider_profiles WHERE provider_id = $1`, e.clientID).Scan(&keptName); err != nil {
+		t.Fatalf("load profile after re-grant: %v", err)
+	}
+	if keptName != "Onboarding Salon" {
+		t.Fatalf("re-grant reset profile display_name=%q", keptName)
+	}
+}
+
+func findService(t *testing.T, page map[string]any, serviceID int64) (map[string]any, bool) {
+	t.Helper()
+	items, ok := page["items"].([]any)
+	if !ok {
+		t.Fatalf("services page has no items: %v", page)
+	}
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("invalid service item: %v", raw)
+		}
+		if number(t, item, "id", "service item") == serviceID {
+			return item, true
+		}
+	}
+	return nil, false
 }

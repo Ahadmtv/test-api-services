@@ -370,6 +370,19 @@ func (s *Service) AdminSetRole(ctx context.Context, actorID, targetID int64, rol
 			return nil, err
 		}
 	}
+	if granted && role == "provider" {
+		createdProfile, err := s.store.EnsureProviderProfile(ctx, tx, targetID)
+		if err != nil {
+			return nil, err
+		}
+		if createdProfile {
+			if err := s.store.InsertAuditEvent(ctx, tx, actorID, targetID, "provider.profile.created", requestID, map[string]any{
+				"source": "role_grant",
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit role change: %w", err)
 	}

@@ -136,6 +136,7 @@ func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.is_active AND p.is_active AND p.verification_status = 'verified'
+			AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = p.provider_id AND ur.role = 'provider')
 	`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrServiceNotFound
@@ -153,6 +154,7 @@ func (s *Store) GetPublicForProvider(ctx context.Context, providerID, serviceID 
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
 			AND s.is_active AND p.is_active AND p.verification_status = 'verified'
+			AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = p.provider_id AND ur.role = 'provider')
 	`, serviceID, providerID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrServiceNotFound
@@ -180,6 +182,7 @@ func (s *Store) GetForBookingTx(ctx context.Context, tx pgx.Tx, providerID, serv
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
 			AND s.is_active AND p.is_active AND p.verification_status = 'verified'
+			AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = p.provider_id AND ur.role = 'provider')
 		FOR SHARE OF s
 	`, serviceID, providerID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -206,7 +209,8 @@ func (s *Store) list(ctx context.Context, providerID *int64, category string, af
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id > $1 AND ($2::bigint IS NULL OR s.provider_id = $2)
 			AND ($3 = '' OR s.category = $3)
-			AND ($2::bigint IS NOT NULL OR (s.is_active AND p.is_active AND p.verification_status = 'verified'))
+			AND ($2::bigint IS NOT NULL OR (s.is_active AND p.is_active AND p.verification_status = 'verified'
+			     AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = p.provider_id AND ur.role = 'provider')))
 		ORDER BY s.id LIMIT $4
 	`, after, providerID, category, limit+1)
 	if err != nil {

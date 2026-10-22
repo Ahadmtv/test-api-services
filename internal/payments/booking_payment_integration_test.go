@@ -26,6 +26,9 @@ func newDirectBookingPaymentFixture(t *testing.T) (*paymentFixture, *booking.Ser
 	`, providerUserID); err != nil {
 		t.Fatalf("create provider profile: %v", err)
 	}
+	if _, err := f.pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, providerUserID); err != nil {
+		t.Fatalf("grant provider role: %v", err)
+	}
 	for weekday := 1; weekday <= 7; weekday++ {
 		if _, err := f.pool.Exec(ctx, `
 			INSERT INTO weekly_working_hours (provider_id, weekday, opens_at, closes_at)

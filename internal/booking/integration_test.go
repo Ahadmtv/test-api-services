@@ -95,6 +95,9 @@ func newBookingFixture(t *testing.T) *bookingFixture {
 		`, providerID); err != nil {
 			t.Fatalf("create provider profile: %v", err)
 		}
+		if _, err := pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'provider')`, providerID); err != nil {
+			t.Fatalf("grant provider role: %v", err)
+		}
 		for weekday := 1; weekday <= 7; weekday++ {
 			if _, err := pool.Exec(ctx, `
 				INSERT INTO weekly_working_hours (provider_id, weekday, opens_at, closes_at)
