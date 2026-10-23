@@ -24,7 +24,18 @@ type Config struct {
 	Booking      BookingConfig
 	Payouts      PayoutConfig
 	Payments     PaymentConfig
+	Images       ImagesConfig
 	Version      string
+}
+
+// ImagesConfig controls server-side image validation, resizing and storage.
+type ImagesConfig struct {
+	StorageDir          string
+	MaxUploadBytes      int64
+	MaxInputDimension   int
+	MaxInputPixels      int64
+	ProfileMaxDimension int
+	CoverMaxDimension   int
 }
 
 type AvailabilityConfig struct {
@@ -115,6 +126,13 @@ const (
 	defaultPendingPaymentTTL      = 15 * time.Minute
 	defaultPayoutMinAmountIRR     = int64(100_000)
 	minAuthAccessTokenSecretLen   = 32
+	defaultImageStorageDir        = "static/img"
+	defaultImageMaxUploadBytes    = int64(5 << 20)
+	defaultImageMaxDimension      = 8000
+	defaultImageMaxPixels         = int64(40_000_000)
+	defaultProfileMaxDimension    = 512
+	defaultCoverMaxDimension      = 1600
+	maxConfiguredImageUploadBytes = int64(25 << 20)
 )
 
 // LoadConfig reads configuration from environment variables and validates it.
@@ -247,7 +265,36 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	cfg.Images = ImagesConfig{
+		StorageDir:          firstNonEmpty(os.Getenv("IMAGE_STORAGE_DIR"), defaultImageStorageDir),
+		MaxUploadBytes:      parseInt64(os.Getenv("IMAGE_MAX_UPLOAD_BYTES"), defaultImageMaxUploadBytes),
+		MaxInputDimension:   parseInt(os.Getenv("IMAGE_MAX_INPUT_DIMENSION"), defaultImageMaxDimension, "IMAGE_MAX_INPUT_DIMENSION"),
+		MaxInputPixels:      parseInt64(os.Getenv("IMAGE_MAX_INPUT_PIXELS"), defaultImageMaxPixels),
+		ProfileMaxDimension: parseInt(os.Getenv("IMAGE_PROFILE_MAX_DIMENSION"), defaultProfileMaxDimension, "IMAGE_PROFILE_MAX_DIMENSION"),
+		CoverMaxDimension:   parseInt(os.Getenv("IMAGE_COVER_MAX_DIMENSION"), defaultCoverMaxDimension, "IMAGE_COVER_MAX_DIMENSION"),
+	}
+	if cfg.Images.MaxUploadBytes < 1 || cfg.Images.MaxUploadBytes > maxConfiguredImageUploadBytes {
+		return nil, fmt.Errorf("IMAGE_MAX_UPLOAD_BYTES must be between 1 and %d", maxConfiguredImageUploadBytes)
+	}
+	if cfg.Images.MaxInputDimension < 1 || cfg.Images.MaxInputPixels < 1 {
+		return nil, fmt.Errorf("IMAGE_MAX_INPUT_DIMENSION and IMAGE_MAX_INPUT_PIXELS must be positive")
+	}
+	if cfg.Images.ProfileMaxDimension < 1 || cfg.Images.CoverMaxDimension <= cfg.Images.ProfileMaxDimension {
+		return nil, fmt.Errorf("IMAGE_COVER_MAX_DIMENSION must exceed IMAGE_PROFILE_MAX_DIMENSION")
+	}
+
 	return cfg, nil
+}
+
+// HTTPBodyLimitForUploads returns the transport body cap needed to accept one
+// image plus multipart overhead while retaining HTTP_BODY_LIMIT for all other
+// endpoints through the route-aware body guard.
+func (c *Config) HTTPBodyLimitForUploads() int {
+	limit := c.Images.MaxUploadBytes + (64 << 10)
+	if int64(c.HTTP.BodyLimit) > limit {
+		return c.HTTP.BodyLimit
+	}
+	return int(limit)
 }
 
 // parseIrrMinimum reads an integer IRR threshold strictly greater than one.
@@ -317,6 +364,17 @@ func parseInt(value string, fallback int, name string) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func parseInt64(value string, fallback int64) int64 {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return fallback
 	}

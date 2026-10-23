@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	fiberstatic "github.com/gofiber/fiber/v3/middleware/static"
 
 	"test-api/internal/adminapi"
 	"test-api/internal/auth"
 	"test-api/internal/booking"
 	"test-api/internal/catalog"
 	"test-api/internal/identity"
+	"test-api/internal/images"
 	"test-api/internal/payments"
 	"test-api/internal/payouts"
 	"test-api/internal/platform"
@@ -122,6 +124,36 @@ func run(ctx context.Context, args []string) error {
 	handler := auth.NewHandler(service, logger, rateLimiter, int64(cfg.Auth.AccessTokenTTL.Seconds()))
 
 	app := platform.NewApp(cfg, logger, db)
+	app.Fiber().Use(platform.BodyLimitGuard(cfg.HTTP.BodyLimit, cfg.HTTPBodyLimitForUploads(), "/api/v1/me/images"))
+
+	imageStorage, err := images.NewStorage(cfg.Images.StorageDir)
+	if err != nil {
+		return fmt.Errorf("image storage: %w", err)
+	}
+	imageService := images.NewService(images.ServiceConfig{
+		Processor: images.NewProcessor(images.ProcessorConfig{
+			MaxUploadBytes:      cfg.Images.MaxUploadBytes,
+			MaxInputDimension:   cfg.Images.MaxInputDimension,
+			MaxInputPixels:      cfg.Images.MaxInputPixels,
+			ProfileMaxDimension: cfg.Images.ProfileMaxDimension,
+			CoverMaxDimension:   cfg.Images.CoverMaxDimension,
+		}),
+		Storage: imageStorage,
+		Store:   images.NewStore(db.Pool()),
+		Logger:  logger,
+	})
+	app.Fiber().Use(platform.StaticImagePrefix, fiberstatic.New(imageStorage.Dir(), fiberstatic.Config{
+		Browse:        false,
+		Compress:      false,
+		MaxAge:        31536000,
+		CacheDuration: 10 * time.Minute,
+		ModifyResponse: func(c fiber.Ctx) error {
+			c.Set("X-Content-Type-Options", "nosniff")
+			return nil
+		},
+	}))
+	images.NewHandler(imageService, cfg.Images.MaxUploadBytes).Register(app.Fiber(), cfg.Auth.AccessTokenSecret, service)
+
 	occupancy := scheduling.NewOccupancyStore(db.Pool())
 	policy := scheduling.AvailabilityPolicy{
 		SlotIncrement:  cfg.Availability.SlotIncrement,

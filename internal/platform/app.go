@@ -26,7 +26,7 @@ func NewApp(config *Config, logger *slog.Logger, db *DB) *App {
 		ReadTimeout:  config.HTTP.ReadTimeout,
 		WriteTimeout: config.HTTP.WriteTimeout,
 		IdleTimeout:  config.HTTP.IdleTimeout,
-		BodyLimit:    config.HTTP.BodyLimit,
+		BodyLimit:    config.HTTPBodyLimitForUploads(),
 		ServerHeader: "test-api",
 	})
 
