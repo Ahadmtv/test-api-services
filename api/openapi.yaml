@@ -109,6 +109,151 @@ paths:
                 $ref: '#/components/schemas/User'
         '401':
           $ref: '#/components/responses/Problem'
+  /api/v1/me/images:
+    get:
+      summary: فهرست تصاویر کاربر جاری
+      description: تصاویر نمایه و در صورت داشتن نقش ارائه‌دهنده، تصویر کاور کاربر احرازشده را برمی‌گرداند.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: مجموعه تصاویر کاربر
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageSet'
+        '401':
+          $ref: '#/components/responses/Problem'
+  /api/v1/me/images/profile:
+    put:
+      summary: بارگذاری یا جایگزینی تصویر نمایه کاربر
+      description: یک تصویر با فرمت JPEG، PNG یا WebP تا حداکثر ۵ مگابایت می‌پذیرد و آن را به‌صورت JPEG استاندارد و برش‌خورده با نسبت ۱:۱ ذخیره می‌کند.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: فایل تصویر ورودی
+      responses:
+        '200':
+          description: تصویر نمایه جایگزین شد
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: نشانی عمومی تصویر ایجاد یا ذخیره‌شده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Image'
+        '201':
+          description: تصویر نمایه جدید ایجاد شد
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: نشانی عمومی تصویر ایجاد یا ذخیره‌شده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Image'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '415':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+    delete:
+      summary: حذف تصویر نمایه کاربر
+      description: تصویر نمایه فعلی کاربر جاری را حذف می‌کند.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: تصویر نمایه با موفقیت حذف شد
+        '401':
+          $ref: '#/components/responses/Problem'
+  /api/v1/me/images/cover:
+    put:
+      summary: بارگذاری یا جایگزینی تصویر کاور ارائه‌دهنده
+      description: فقط برای کاربران با نقش ارائه‌دهنده مجاز است. تصویر ورودی به نسبت ۱۶:۹ برش خورده و با ابعاد حداکثر ۱۶۰۰ پیکسل به‌صورت JPEG ذخیره می‌شود.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: فایل تصویر ورودی
+      responses:
+        '200':
+          description: تصویر کاور جایگزین شد
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: نشانی عمومی تصویر ایجاد یا ذخیره‌شده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Image'
+        '201':
+          description: تصویر کاور جدید ایجاد شد
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: نشانی عمومی تصویر ایجاد یا ذخیره‌شده
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Image'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '415':
+          $ref: '#/components/responses/Problem'
+        '422':
+          $ref: '#/components/responses/Problem'
+    delete:
+      summary: حذف تصویر کاور ارائه‌دهنده
+      description: فقط برای کاربران با نقش ارائه‌دهنده مجاز است. تصویر کاور ارائه‌دهنده را حذف می‌کند.
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: تصویر کاور با موفقیت حذف شد
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
   /api/v1/services:
     get:
       summary: فهرست خدمات فعال و تأییدشده
@@ -1319,6 +1464,9 @@ components:
         roles:
           type: array
           items: { type: string }
+        profile_image_url:
+          type: string
+          description: نشانی اینترنتی تصویر نمایه کاربر در صورت وجود
     AdminUser:
       type: object
       required: [id, email, phone, display_name, roles, is_active, created_at]
@@ -1413,6 +1561,12 @@ components:
         verification_status:
           type: string
           enum: [pending, verified, rejected]
+        profile_image_url:
+          type: string
+          description: نشانی اینترنتی تصویر نمایه ارائه‌دهنده
+        cover_image_url:
+          type: string
+          description: نشانی اینترنتی تصویر سربرگ یا کاور ارائه‌دهنده
     ProviderProfileInput:
       type: object
       required: [display_name, is_active]
@@ -1459,6 +1613,9 @@ components:
           type: string
           maxLength: 160
           description: نام نمایشی ارائه‌دهنده خدمت؛ برای نمایش در فهرست عمومی. مقدار خالی یعنی نمایه ارائه‌دهنده هنوز تکمیل نشده است.
+        provider_profile_image_url:
+          type: string
+          description: نشانی اینترنتی تصویر نمایه ارائه‌دهنده این خدمت در صورت وجود
     ServiceInput:
       type: object
       required: [name, duration_minutes, price_irr]
@@ -1768,3 +1925,37 @@ components:
               end_at:
                 type: string
                 format: date-time
+    Image:
+      type: object
+      required: [purpose, url, content_type, width, height, byte_size, updated_at]
+      properties:
+        purpose:
+          type: string
+          enum: [profile, cover]
+          description: جایگاه تصویر (نمایه کاربر یا کاور ارائه‌دهنده)
+        url:
+          type: string
+          description: نشانی وب عمومی تصویر
+        content_type:
+          type: string
+          example: image/jpeg
+        width:
+          type: integer
+          example: 512
+        height:
+          type: integer
+          example: 512
+        byte_size:
+          type: integer
+          format: int64
+          example: 125400
+        updated_at:
+          type: string
+          format: date-time
+    ImageSet:
+      type: object
+      properties:
+        profile:
+          $ref: '#/components/schemas/Image'
+        cover:
+          $ref: '#/components/schemas/Image'
