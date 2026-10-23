@@ -24,6 +24,7 @@ type Principal struct {
 type Store interface {
 	GetUserByEmail(ctx context.Context, email string) (*UserRecord, error)
 	GetUserByID(ctx context.Context, userID int64) (*UserRecord, error)
+	GetProfileImageKey(ctx context.Context, userID int64) (string, error)
 	CreateUser(ctx context.Context, tx pgx.Tx, email string, phone *string, passwordHash string) (int64, error)
 	AddRole(ctx context.Context, tx pgx.Tx, userID int64, role string) error
 	FindRefreshToken(ctx context.Context, tokenHash string) (*RefreshRow, error)
@@ -54,11 +55,12 @@ type AdminUser struct {
 
 // User is a public user profile returned to callers.
 type User struct {
-	ID       int64
-	Email    string
-	Phone    *string
-	IsActive bool
-	Roles    []string
+	ID              int64
+	Email           string
+	Phone           *string
+	IsActive        bool
+	Roles           []string
+	ProfileImageURL string
 }
 
 // UserRecord is the internal row representation including the password hash.
@@ -178,6 +180,20 @@ func (s *pgxStore) GetUserByID(ctx context.Context, userID int64) (*UserRecord, 
 	}
 	record.Roles = roles
 	return record, nil
+}
+
+func (s *pgxStore) GetProfileImageKey(ctx context.Context, userID int64) (string, error) {
+	var storageKey string
+	err := s.pool.QueryRow(ctx, `
+		SELECT storage_key FROM user_images WHERE user_id = $1 AND purpose = 'profile'
+	`, userID).Scan(&storageKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get profile image key: %w", err)
+	}
+	return storageKey, nil
 }
 
 func (s *pgxStore) getUserRoles(ctx context.Context, userID int64) ([]string, error) {

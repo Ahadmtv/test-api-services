@@ -75,11 +75,12 @@ type tokenPairResponse struct {
 }
 
 type meResponse struct {
-	ID       int64    `json:"id"`
-	Email    string   `json:"email"`
-	Phone    *string  `json:"phone,omitempty"`
-	IsActive bool     `json:"is_active"`
-	Roles    []string `json:"roles"`
+	ID              int64    `json:"id"`
+	Email           string   `json:"email"`
+	Phone           *string  `json:"phone,omitempty"`
+	IsActive        bool     `json:"is_active"`
+	Roles           []string `json:"roles"`
+	ProfileImageURL string   `json:"profile_image_url"`
 }
 
 // Register godoc
@@ -206,11 +207,12 @@ func (h *Handler) Me(c fiber.Ctx) error {
 	}
 
 	return c.Status(200).Type("application/json").JSON(meResponse{
-		ID:       user.ID,
-		Email:    user.Email,
-		Phone:    user.Phone,
-		IsActive: user.IsActive,
-		Roles:    user.Roles,
+		ID:              user.ID,
+		Email:           user.Email,
+		Phone:           user.Phone,
+		IsActive:        user.IsActive,
+		Roles:           user.Roles,
+		ProfileImageURL: user.ProfileImageURL,
 	})
 }
 

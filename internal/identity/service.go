@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"test-api/internal/platform"
 )
 
 // Service performs authentication operations.
@@ -428,12 +430,17 @@ func (s *Service) Me(ctx context.Context, userID int64) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
 	}
+	profileImageKey, err := s.store.GetProfileImageKey(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	return &User{
-		ID:       record.ID,
-		Email:    record.Email,
-		Phone:    record.Phone,
-		IsActive: record.IsActive,
-		Roles:    record.Roles,
+		ID:              record.ID,
+		Email:           record.Email,
+		Phone:           record.Phone,
+		IsActive:        record.IsActive,
+		Roles:           record.Roles,
+		ProfileImageURL: platform.PublicImageURL(profileImageKey),
 	}, nil
 }
 

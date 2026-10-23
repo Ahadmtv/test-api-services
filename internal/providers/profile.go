@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"test-api/internal/platform"
 )
 
 type Profile struct {
@@ -20,6 +22,8 @@ type Profile struct {
 	TimeZone           string `json:"time_zone"`
 	IsActive           bool   `json:"is_active"`
 	VerificationStatus string `json:"verification_status"`
+	ProfileImageURL    string `json:"profile_image_url"`
+	CoverImageURL      string `json:"cover_image_url"`
 }
 
 var ErrProfileNotFound = errors.New("provider profile not found")
@@ -49,16 +53,21 @@ func ValidateProfile(displayName, timeZone string) error {
 
 func (s *Service) Get(ctx context.Context, providerID int64) (*Profile, error) {
 	var profile Profile
+	var profileImageKey, coverImageKey string
 	err := s.pool.QueryRow(ctx, `
-		SELECT provider_id, display_name, description, time_zone, is_active, verification_status
+		SELECT provider_id, display_name, description, time_zone, is_active, verification_status,
+		       COALESCE((SELECT storage_key FROM user_images WHERE user_id = provider_profiles.provider_id AND purpose = 'profile'), ''),
+		       COALESCE((SELECT storage_key FROM user_images WHERE user_id = provider_profiles.provider_id AND purpose = 'cover'), '')
 		FROM provider_profiles WHERE provider_id = $1
-	`, providerID).Scan(&profile.ProviderID, &profile.DisplayName, &profile.Description, &profile.TimeZone, &profile.IsActive, &profile.VerificationStatus)
+	`, providerID).Scan(&profile.ProviderID, &profile.DisplayName, &profile.Description, &profile.TimeZone, &profile.IsActive, &profile.VerificationStatus, &profileImageKey, &coverImageKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProfileNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get provider profile: %w", err)
 	}
+	profile.ProfileImageURL = platform.PublicImageURL(profileImageKey)
+	profile.CoverImageURL = platform.PublicImageURL(coverImageKey)
 	return &profile, nil
 }
 
@@ -120,15 +129,14 @@ func (s *Service) SetVerificationStatus(ctx context.Context, actorID, providerID
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit provider verification: %w", err)
 	}
-	return &profile, nil
+	return s.Get(ctx, providerID)
 }
 
 func (s *Service) Put(ctx context.Context, providerID int64, displayName, description, timeZone string, active bool) (*Profile, error) {
 	if err := ValidateProfile(displayName, timeZone); err != nil {
 		return nil, err
 	}
-	var profile Profile
-	err := s.pool.QueryRow(ctx, `
+	_, err := s.pool.Exec(ctx, `
 		INSERT INTO provider_profiles (provider_id, display_name, description, time_zone, is_active)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (provider_id) DO UPDATE SET
@@ -137,12 +145,11 @@ func (s *Service) Put(ctx context.Context, providerID int64, displayName, descri
 		time_zone = EXCLUDED.time_zone,
 		is_active = EXCLUDED.is_active,
 		updated_at = now()
-		RETURNING provider_id, display_name, description, time_zone, is_active, verification_status
-	`, providerID, strings.TrimSpace(displayName), description, timeZone, active).Scan(&profile.ProviderID, &profile.DisplayName, &profile.Description, &profile.TimeZone, &profile.IsActive, &profile.VerificationStatus)
+	`, providerID, strings.TrimSpace(displayName), description, timeZone, active)
 	if err != nil {
 		return nil, fmt.Errorf("save provider profile: %w", err)
 	}
-	return &profile, nil
+	return s.Get(ctx, providerID)
 }
 
 // AdminProfile is the administrator view of a provider profile with the

@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"test-api/internal/platform"
 )
 
 const (
@@ -33,16 +35,17 @@ var serviceCategories = []string{
 }
 
 type ServiceItem struct {
-	ID                  int64  `json:"id"`
-	ProviderID          int64  `json:"provider_id"`
-	Name                string `json:"name"`
-	Description         string `json:"description"`
-	Category            string `json:"category"`
-	DurationMinutes     int    `json:"duration_minutes"`
-	PriceIRR            int64  `json:"price_irr"`
-	BufferMinutes       int    `json:"buffer_minutes"`
-	IsActive            bool   `json:"is_active"`
-	ProviderDisplayName string `json:"provider_display_name"`
+	ID                      int64  `json:"id"`
+	ProviderID              int64  `json:"provider_id"`
+	Name                    string `json:"name"`
+	Description             string `json:"description"`
+	Category                string `json:"category"`
+	DurationMinutes         int    `json:"duration_minutes"`
+	PriceIRR                int64  `json:"price_irr"`
+	BufferMinutes           int    `json:"buffer_minutes"`
+	IsActive                bool   `json:"is_active"`
+	ProviderDisplayName     string `json:"provider_display_name"`
+	ProviderProfileImageURL string `json:"provider_profile_image_url"`
 }
 
 type CreateInput struct {
@@ -117,13 +120,16 @@ func (s *Store) Create(ctx context.Context, providerID int64, input CreateInput)
 		return nil, err
 	}
 	var item ServiceItem
+	var key string
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO services (provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, provider_id, name, description, category, duration_minutes, price_irr, buffer_minutes, is_active,
-			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = services.provider_id)
+			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = services.provider_id),
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = services.provider_id AND ui.purpose = 'profile'), '')
 	`, providerID, validated.Name, validated.Description, validated.Category, validated.DurationMinutes, validated.PriceIRR, validated.BufferMinutes, validated.IsActive).
-		Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName)
+		Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName, &key)
+	item.ProviderProfileImageURL = platform.PublicImageURL(key)
 	if err != nil {
 		return nil, fmt.Errorf("create service: %w", err)
 	}
@@ -132,7 +138,8 @@ func (s *Store) Create(ctx context.Context, providerID int64, input CreateInput)
 
 func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 	item, err := scanService(s.pool.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name,
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = s.provider_id AND ui.purpose = 'profile'), '')
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.is_active AND p.is_active AND p.verification_status = 'verified'
@@ -149,7 +156,8 @@ func (s *Store) GetPublic(ctx context.Context, id int64) (*ServiceItem, error) {
 
 func (s *Store) GetPublicForProvider(ctx context.Context, providerID, serviceID int64) (*ServiceItem, error) {
 	item, err := scanService(s.pool.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name,
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = s.provider_id AND ui.purpose = 'profile'), '')
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
@@ -177,7 +185,8 @@ func (s *Store) BookingProviderIDTx(ctx context.Context, tx pgx.Tx, serviceID in
 
 func (s *Store) GetForBookingTx(ctx context.Context, tx pgx.Tx, providerID, serviceID int64) (*ServiceItem, error) {
 	item, err := scanService(tx.QueryRow(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name,
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = s.provider_id AND ui.purpose = 'profile'), '')
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id = $1 AND s.provider_id = $2
@@ -204,7 +213,8 @@ func (s *Store) ListOwned(ctx context.Context, providerID, after int64, limit in
 
 func (s *Store) list(ctx context.Context, providerID *int64, category string, after int64, limit int) ([]ServiceItem, bool, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name
+		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active, p.display_name,
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = s.provider_id AND ui.purpose = 'profile'), '')
 		FROM services s
 		JOIN provider_profiles p ON p.provider_id = s.provider_id
 		WHERE s.id > $1 AND ($2::bigint IS NULL OR s.provider_id = $2)
@@ -221,9 +231,11 @@ func (s *Store) list(ctx context.Context, providerID *int64, category string, af
 	items := make([]ServiceItem, 0, limit)
 	for rows.Next() {
 		var item ServiceItem
-		if err := rows.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName); err != nil {
+		var key string
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName, &key); err != nil {
 			return nil, false, err
 		}
+		item.ProviderProfileImageURL = platform.PublicImageURL(key)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -259,7 +271,8 @@ func (s *Store) Update(ctx context.Context, providerID, serviceID int64, input U
 
 	item, err := scanService(tx.QueryRow(ctx, `
 		SELECT s.id, s.provider_id, s.name, s.description, s.category, s.duration_minutes, s.price_irr, s.buffer_minutes, s.is_active,
-			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = s.provider_id)
+			(SELECT pp.display_name FROM provider_profiles pp WHERE pp.provider_id = s.provider_id),
+			COALESCE((SELECT ui.storage_key FROM user_images ui WHERE ui.user_id = s.provider_id AND ui.purpose = 'profile'), '')
 		FROM services s WHERE s.id = $1 AND s.provider_id = $2 FOR UPDATE
 	`, serviceID, providerID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -311,9 +324,11 @@ func (s *Store) Update(ctx context.Context, providerID, serviceID int64, input U
 
 func scanService(row pgx.Row) (*ServiceItem, error) {
 	var item ServiceItem
-	err := row.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName)
+	var key string
+	err := row.Scan(&item.ID, &item.ProviderID, &item.Name, &item.Description, &item.Category, &item.DurationMinutes, &item.PriceIRR, &item.BufferMinutes, &item.IsActive, &item.ProviderDisplayName, &key)
 	if err != nil {
 		return nil, err
 	}
+	item.ProviderProfileImageURL = platform.PublicImageURL(key)
 	return &item, nil
 }
