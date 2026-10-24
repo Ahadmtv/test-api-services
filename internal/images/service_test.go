@@ -240,4 +240,3 @@ func TestService_Delete(t *testing.T) {
 		t.Errorf("expected ErrInvalidPurpose, got %v", err)
 	}
 }
-

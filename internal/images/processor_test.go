@@ -292,4 +292,3 @@ func TestDetectImageType_WebP(t *testing.T) {
 		t.Errorf("detectImageType webp header: got %s, want image/webp", got)
 	}
 }
-

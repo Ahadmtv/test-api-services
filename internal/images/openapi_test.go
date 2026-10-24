@@ -30,4 +30,3 @@ func TestOpenAPIContractIncludesImageEndpoints(t *testing.T) {
 		}
 	}
 }
-

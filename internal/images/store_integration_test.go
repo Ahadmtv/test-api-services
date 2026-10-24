@@ -90,4 +90,3 @@ func TestStoreIntegration(t *testing.T) {
 		t.Errorf("expected ErrImageNotFound, got %v", err)
 	}
 }
-
