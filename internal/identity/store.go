@@ -270,11 +270,15 @@ func (s *pgxStore) FindRefreshTokenForUpdate(ctx context.Context, tx pgx.Tx, tok
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by
-		FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE
+		FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE NOWAIT
 	`, tokenHash).Scan(&id, &userID, &tokenHashS, &expiresAt, &revokedAt, &replacedBy)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrRefreshTokenNotFound
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			return nil, ErrRefreshInProgress
 		}
 		return nil, fmt.Errorf("lock refresh token: %w", err)
 	}

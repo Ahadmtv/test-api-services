@@ -56,6 +56,7 @@ var (
 	ErrRefreshTokenExpired  = errors.New("refresh token expired")
 	ErrRefreshTokenRevoked  = errors.New("refresh token revoked")
 	ErrTokenReplayDetected  = errors.New("token replay detected; all sessions revoked")
+	ErrRefreshInProgress    = errors.New("refresh token rotation in progress")
 	ErrInvalidInput         = errors.New("invalid input")
 	ErrUserInactive         = errors.New("user inactive")
 	ErrInvalidRole          = errors.New("invalid role")
@@ -197,6 +198,9 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (*TokenPair,
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenNotFound) {
 			return nil, ErrInvalidCredentials
+		}
+		if errors.Is(err, ErrRefreshInProgress) {
+			return nil, ErrRefreshInProgress
 		}
 		return nil, fmt.Errorf("find refresh token: %w", err)
 	}

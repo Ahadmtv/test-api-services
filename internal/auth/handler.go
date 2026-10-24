@@ -167,6 +167,8 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		switch {
 		case errors.Is(err, identity.ErrTokenReplayDetected):
 			return platform.NewAppError("token_replay", "ورود مجدد شناسایی شد، کلیه جلسات لغو شد", 401, nil)
+		case errors.Is(err, identity.ErrRefreshInProgress):
+			return platform.NewAppError("refresh_in_progress", "چرخش Refresh در حال انجام است؛ لطفاً دوباره تلاش کنید", 409, nil)
 		default:
 			return platform.NewAppError("invalid_credentials", "توکنRefresh نامعتبر است", 401, nil)
 		}

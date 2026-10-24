@@ -163,6 +163,29 @@ func TestRefresh(t *testing.T) {
 	}
 }
 
+func TestRefreshInProgress(t *testing.T) {
+	ms, app := setupTestHandler(t)
+	ms.refreshErr = identity.ErrRefreshInProgress
+
+	resp, err := postJSON(t, app, "/refresh", map[string]string{
+		"refresh_token": "refresh-user@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 409 {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var problem problemBody
+	if err := json.NewDecoder(resp.Body).Decode(&problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Code != "refresh_in_progress" {
+		t.Errorf("code = %q, want refresh_in_progress", problem.Code)
+	}
+}
+
 func TestRefreshUnknownToken(t *testing.T) {
 	_, app := setupTestHandler(t)
 
