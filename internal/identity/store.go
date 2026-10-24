@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -106,6 +107,10 @@ func (s *pgxStore) CreateUser(ctx context.Context, tx pgx.Tx, email string, phon
 		RETURNING id
 	`, email, phone, passwordHash)
 	if err := row.Scan(&id); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return 0, ErrUserAlreadyExists
+		}
 		return 0, fmt.Errorf("create user: %w", err)
 	}
 	return id, nil
