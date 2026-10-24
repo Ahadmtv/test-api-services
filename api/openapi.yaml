@@ -55,7 +55,7 @@ paths:
   /api/v1/auth/refresh:
     post:
       summary: تایید مجدد و چرخش توکن Refresh
-      description: توکن Refresh ارائه‌شده در یک تراکنش مصرف، لغو و با توکن تازه جایگزین می‌شود؛ نشست تازه ایمیل و نقش‌های جاری کاربر را حفظ می‌کند. استفاده مجدد از توکن چرخیده‌شده به‌عنوان replay شناسایی می‌شود و همه نشست‌های فعال کاربر لغو می‌شوند.
+      description: توکن Refresh ارائه‌شده در یک تراکنش مصرف، لغو و با توکن تازه جایگزین می‌شود؛ نشست تازه ایمیل و نقش‌های جاری کاربر را حفظ می‌کند. استفاده مجدد از توکن چرخیده‌شده به‌عنوان replay شناسایی می‌شود و همه نشست‌های فعال کاربر لغو می‌شوند. اگر دو درخواست هم‌زمان با یک توکن در حال چرخش باشند، درخواست بازنده با وضعیت 409 و کد refresh_in_progress رد می‌شود و نشست‌های کاربر لغو نمی‌شوند.
       requestBody:
         required: true
         content:
@@ -72,6 +72,8 @@ paths:
         '400':
           $ref: '#/components/responses/Problem'
         '401':
+          $ref: '#/components/responses/Problem'
+        '409':
           $ref: '#/components/responses/Problem'
         '429':
           $ref: '#/components/responses/Problem'
