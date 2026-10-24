@@ -39,13 +39,15 @@ func TestLoadConfigMissingRequired(t *testing.T) {
 
 func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	envWith(t, map[string]string{
-		"DB_USER":                  "tester",
-		"DB_NAME":                  "testdb",
-		"DB_PASSWORD":              "secret",
-		"HTTP_PORT":                "18080",
-		"LOG_LEVEL":                "debug",
-		"LOG_FORMAT":               "text",
-		"AUTH_ACCESS_TOKEN_SECRET": "01234567890123456789012345678901",
+		"DB_USER":                      "tester",
+		"DB_NAME":                      "testdb",
+		"DB_PASSWORD":                  "secret",
+		"HTTP_PORT":                    "18080",
+		"LOG_LEVEL":                    "debug",
+		"LOG_FORMAT":                   "text",
+		"AUTH_ACCESS_TOKEN_SECRET":     "01234567890123456789012345678901",
+		"BOOKING_PENDING_PAYMENT_TTL":  "",
+		"BOOKING_PAYMENT_EXPIRY_GRACE": "",
 	})
 
 	cfg, err := LoadConfig()
@@ -80,7 +82,7 @@ func TestLoadConfigDefaultsAndDSN(t *testing.T) {
 	if cfg.Availability.SlotIncrement != 15*time.Minute || cfg.Availability.MinimumNotice != 2*time.Hour || cfg.Availability.MaximumHorizon != 90*24*time.Hour {
 		t.Errorf("availability config = %+v", cfg.Availability)
 	}
-	if cfg.Booking.CancellationCutoff != 0 {
+	if cfg.Booking.CancellationCutoff != 0 || cfg.Booking.PendingPaymentTTL != defaultPendingPaymentTTL || cfg.Booking.ExpiryGrace != defaultBookingPaymentExpiryGrace {
 		t.Errorf("booking config = %+v", cfg.Booking)
 	}
 
@@ -135,16 +137,18 @@ func TestLoadConfigRejectsInvalidAvailabilitySettings(t *testing.T) {
 
 func TestLoadConfigBookingPolicyOverrides(t *testing.T) {
 	envWith(t, map[string]string{
-		"DB_USER":                     "tester",
-		"DB_NAME":                     "testdb",
-		"AUTH_ACCESS_TOKEN_SECRET":    "01234567890123456789012345678901",
-		"BOOKING_CANCELLATION_CUTOFF": "1h",
+		"DB_USER":                      "tester",
+		"DB_NAME":                      "testdb",
+		"AUTH_ACCESS_TOKEN_SECRET":     "01234567890123456789012345678901",
+		"BOOKING_CANCELLATION_CUTOFF":  "1h",
+		"BOOKING_PENDING_PAYMENT_TTL":  "30m",
+		"BOOKING_PAYMENT_EXPIRY_GRACE": "45m",
 	})
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("load booking policy config: %v", err)
 	}
-	if cfg.Booking.CancellationCutoff != time.Hour {
+	if cfg.Booking.CancellationCutoff != time.Hour || cfg.Booking.PendingPaymentTTL != 30*time.Minute || cfg.Booking.ExpiryGrace != 45*time.Minute {
 		t.Fatalf("booking config = %+v", cfg.Booking)
 	}
 }
@@ -154,12 +158,16 @@ func TestLoadConfigRejectsInvalidBookingPolicy(t *testing.T) {
 		name, value string
 	}{
 		{"BOOKING_CANCELLATION_CUTOFF", "-1m"},
+		{"BOOKING_PENDING_PAYMENT_TTL", "0s"},
+		{"BOOKING_PAYMENT_EXPIRY_GRACE", "-1s"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			t.Setenv("DB_USER", "tester")
 			t.Setenv("DB_NAME", "testdb")
 			t.Setenv("AUTH_ACCESS_TOKEN_SECRET", "01234567890123456789012345678901")
 			t.Setenv("BOOKING_CANCELLATION_CUTOFF", "")
+			t.Setenv("BOOKING_PENDING_PAYMENT_TTL", "")
+			t.Setenv("BOOKING_PAYMENT_EXPIRY_GRACE", "")
 			t.Setenv(tc.name, tc.value)
 			if _, err := LoadConfig(); err == nil {
 				t.Fatalf("expected invalid booking setting %s=%s", tc.name, tc.value)

@@ -1793,7 +1793,7 @@ components:
         payment_expires_at:
           type: [string, 'null']
           format: date-time
-          description: مهلت پرداخت رزروهای pending_payment؛ پس از آن رزرو فقط در نبود تلاش پرداخت فعال منقضی می‌شود
+          description: مهلت اولیه پرداخت؛ رزرو پس از این زمان به‌علاوه BOOKING_PAYMENT_EXPIRY_GRACE منقضی می‌شود، حتی اگر تلاش پرداخت حل‌نشده باشد
         completion_requested_at:
           type: [string, 'null']
           format: date-time

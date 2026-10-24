@@ -49,6 +49,7 @@ type Config struct {
 	// PendingPaymentTTL is how long a gateway-funded booking reserves its slot
 	// while the client completes payment.
 	PendingPaymentTTL time.Duration
+	ExpiryGrace       time.Duration
 	Availability      scheduling.AvailabilityPolicy
 }
 
@@ -789,6 +790,16 @@ func (s *Service) ConfirmGatewayPaymentTx(ctx context.Context, tx pgx.Tx, input 
 	if status != "pending_payment" || paymentMethod != PaymentMethodZarinpal {
 		return ErrInvalidTransition
 	}
+	var paymentWindowOpen bool
+	if err := tx.QueryRow(ctx, `
+		SELECT payment_expires_at + make_interval(secs => $2::double precision) > clock_timestamp()
+		FROM bookings WHERE id = $1
+	`, input.BookingID, s.config.ExpiryGrace.Seconds()).Scan(&paymentWindowOpen); err != nil {
+		return fmt.Errorf("check gateway payment window: %w", err)
+	}
+	if !paymentWindowOpen {
+		return ErrInvalidTransition
+	}
 	if priceIRR != input.AmountIRR {
 		return ErrPaymentAmountMismatch
 	}
@@ -866,26 +877,26 @@ func (s *Service) FailGatewayPaymentTx(ctx context.Context, tx pgx.Tx, bookingID
 	return nil
 }
 
-// ExpirePendingPayments releases slots of unpaid gateway bookings after their
-// deadline. A booking with an in-flight gateway attempt is left untouched so a
-// late success can never arrive after the slot was resold.
+// ExpirePendingPayments releases slots after the payment deadline and grace,
+// regardless of whether the gateway attempt has been resolved.
 func (s *Service) ExpirePendingPayments(ctx context.Context, limit int) (int, error) {
 	if limit < 1 {
 		return 0, ErrInvalidInput
 	}
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin pending payment expiry: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
 		SELECT b.id FROM bookings b
 		WHERE b.status = 'pending_payment'
-		  AND b.payment_expires_at <= now()
-		  AND NOT EXISTS (
-		      SELECT 1 FROM payment_attempts p
-		      WHERE p.booking_id = b.id
-		        AND p.status IN ('created', 'pending', 'verification_unknown')
-		  )
-		ORDER BY b.id
+		  AND b.payment_expires_at <= now() - make_interval(secs => $2::double precision)
+		ORDER BY b.payment_expires_at, b.id
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED
-	`, limit)
+	`, limit, s.config.ExpiryGrace.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("select expired pending payments: %w", err)
 	}
@@ -894,50 +905,38 @@ func (s *Service) ExpirePendingPayments(ctx context.Context, limit int) (int, er
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return 0, err
+			return 0, fmt.Errorf("scan expired pending payment: %w", err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, err
+		return 0, fmt.Errorf("read expired pending payments: %w", err)
 	}
 	rows.Close()
 
 	expired := 0
 	for _, id := range ids {
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return expired, fmt.Errorf("begin pending payment expiry: %w", err)
-		}
 		if _, err := tx.Exec(ctx, `
 			SELECT set_config('app.actor_type', 'system', true),
 			       set_config('app.actor_user_id', '', true),
 			       set_config('app.request_id', 'pending-payment-expiry', true),
 			       set_config('app.transition_reason', 'payment_window_expired', true)
 		`); err != nil {
-			_ = tx.Rollback(ctx)
-			return expired, fmt.Errorf("set pending payment expiry context: %w", err)
+			return 0, fmt.Errorf("set pending payment expiry context: %w", err)
 		}
 		result, err := tx.Exec(ctx, `
 			UPDATE bookings SET status = 'expired', updated_at = now()
-			WHERE id = $1 AND status = 'pending_payment' AND payment_expires_at <= now()
-			  AND NOT EXISTS (
-			      SELECT 1 FROM payment_attempts p
-			      WHERE p.booking_id = bookings.id
-			        AND p.status IN ('created', 'pending', 'verification_unknown')
-			  )
-		`, id)
+			WHERE id = $1 AND status = 'pending_payment'
+			  AND payment_expires_at <= now() - make_interval(secs => $2::double precision)
+		`, id, s.config.ExpiryGrace.Seconds())
 		if err != nil {
-			_ = tx.Rollback(ctx)
-			return expired, fmt.Errorf("expire pending payment booking %d: %w", id, err)
+			return 0, fmt.Errorf("expire pending payment booking %d: %w", id, err)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return expired, fmt.Errorf("commit pending payment expiry: %w", err)
-		}
-		if result.RowsAffected() == 1 {
-			expired++
-		}
+		expired += int(result.RowsAffected())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit pending payment expiry: %w", err)
 	}
 	return expired, nil
 }

@@ -51,6 +51,7 @@ type BookingConfig struct {
 	CompletionDisputeWindow time.Duration
 	// PendingPaymentTTL is how long gateway-funded bookings reserve their slot.
 	PendingPaymentTTL time.Duration
+	ExpiryGrace       time.Duration
 }
 
 type PayoutConfig struct {
@@ -99,40 +100,41 @@ type LogConfig struct {
 }
 
 const (
-	defaultEnv                    = "development"
-	defaultVersion                = "0.1.0"
-	defaultHTTPHost               = "0.0.0.0"
-	defaultHTTPPort               = 8080
-	defaultReadTimeout            = 10 * time.Second
-	defaultWriteTimeout           = 10 * time.Second
-	defaultIdleTimeout            = 30 * time.Second
-	defaultHTTPBodyLimit          = 1 << 20
-	defaultDBHost                 = "localhost"
-	defaultDBPort                 = 5432
-	defaultDBSSLMode              = "disable"
-	defaultDBMaxOpenConns         = 25
-	defaultDBMaxIdleConns         = 5
-	defaultDBMaxConnIdle          = 10 * time.Minute
-	defaultDBMaxConnLife          = 1 * time.Hour
-	defaultLogLevel               = "info"
-	defaultLogFormat              = "json"
-	defaultAuthAccessTokenTTL     = 15 * time.Minute
-	defaultAuthRefreshTokenTTL    = 168 * time.Hour
-	defaultAuthRateLimitPerMinute = 30
-	defaultAvailabilitySlot       = 15 * time.Minute
-	defaultAvailabilityNotice     = 2 * time.Hour
-	defaultAvailabilityHorizon    = 90 * 24 * time.Hour
-	defaultDisputeWindow          = 72 * time.Hour
-	defaultPendingPaymentTTL      = 15 * time.Minute
-	defaultPayoutMinAmountIRR     = int64(100_000)
-	minAuthAccessTokenSecretLen   = 32
-	defaultImageStorageDir        = "static/img"
-	defaultImageMaxUploadBytes    = int64(5 << 20)
-	defaultImageMaxDimension      = 8000
-	defaultImageMaxPixels         = int64(40_000_000)
-	defaultProfileMaxDimension    = 512
-	defaultCoverMaxDimension      = 1600
-	maxConfiguredImageUploadBytes = int64(25 << 20)
+	defaultEnv                       = "development"
+	defaultVersion                   = "0.1.0"
+	defaultHTTPHost                  = "0.0.0.0"
+	defaultHTTPPort                  = 8080
+	defaultReadTimeout               = 10 * time.Second
+	defaultWriteTimeout              = 10 * time.Second
+	defaultIdleTimeout               = 30 * time.Second
+	defaultHTTPBodyLimit             = 1 << 20
+	defaultDBHost                    = "localhost"
+	defaultDBPort                    = 5432
+	defaultDBSSLMode                 = "disable"
+	defaultDBMaxOpenConns            = 25
+	defaultDBMaxIdleConns            = 5
+	defaultDBMaxConnIdle             = 10 * time.Minute
+	defaultDBMaxConnLife             = 1 * time.Hour
+	defaultLogLevel                  = "info"
+	defaultLogFormat                 = "json"
+	defaultAuthAccessTokenTTL        = 15 * time.Minute
+	defaultAuthRefreshTokenTTL       = 168 * time.Hour
+	defaultAuthRateLimitPerMinute    = 30
+	defaultAvailabilitySlot          = 15 * time.Minute
+	defaultAvailabilityNotice        = 2 * time.Hour
+	defaultAvailabilityHorizon       = 90 * 24 * time.Hour
+	defaultDisputeWindow             = 72 * time.Hour
+	defaultPendingPaymentTTL         = 15 * time.Minute
+	defaultBookingPaymentExpiryGrace = 15 * time.Minute
+	defaultPayoutMinAmountIRR        = int64(100_000)
+	minAuthAccessTokenSecretLen      = 32
+	defaultImageStorageDir           = "static/img"
+	defaultImageMaxUploadBytes       = int64(5 << 20)
+	defaultImageMaxDimension         = 8000
+	defaultImageMaxPixels            = int64(40_000_000)
+	defaultProfileMaxDimension       = 512
+	defaultCoverMaxDimension         = 1600
+	maxConfiguredImageUploadBytes    = int64(25 << 20)
 )
 
 // LoadConfig reads configuration from environment variables and validates it.
@@ -256,6 +258,10 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	cfg.Booking.PendingPaymentTTL, err = parseAvailabilityDuration("BOOKING_PENDING_PAYMENT_TTL", defaultPendingPaymentTTL, false)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Booking.ExpiryGrace, err = parseAvailabilityDuration("BOOKING_PAYMENT_EXPIRY_GRACE", defaultBookingPaymentExpiryGrace, true)
 	if err != nil {
 		return nil, err
 	}

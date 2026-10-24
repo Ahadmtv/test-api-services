@@ -14,6 +14,9 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /bin/api ./cmd/api
 
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /bin/worker ./cmd/worker
+
 # Create runtime directories needed by non-root user in scratch
 RUN mkdir -p -m 0750 /static/img && chown -R 65534:65534 /static && \
     mkdir -p -m 1777 /tmp
@@ -26,6 +29,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /bin/api /bin/api
+COPY --from=builder /bin/worker /bin/worker
 COPY --from=builder --chown=65534:65534 /static /static
 COPY --from=builder /tmp /tmp
 

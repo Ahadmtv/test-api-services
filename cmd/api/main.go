@@ -268,6 +268,7 @@ func bookingConfigFrom(cfg *platform.Config) booking.Config {
 		CancellationCutoff:      cfg.Booking.CancellationCutoff,
 		CompletionDisputeWindow: cfg.Booking.CompletionDisputeWindow,
 		PendingPaymentTTL:       cfg.Booking.PendingPaymentTTL,
+		ExpiryGrace:             cfg.Booking.ExpiryGrace,
 		Availability: scheduling.AvailabilityPolicy{
 			SlotIncrement:  cfg.Availability.SlotIncrement,
 			MinimumNotice:  cfg.Availability.MinimumNotice,

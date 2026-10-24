@@ -56,10 +56,53 @@ services:
       PAYMENT_RETURN_URL: ${PAYMENT_RETURN_URL:-}
       IMAGE_STORAGE_DIR: /static/img
       BOOKING_CANCELLATION_CUTOFF: ${BOOKING_CANCELLATION_CUTOFF:-0s}
+      BOOKING_PENDING_PAYMENT_TTL: ${BOOKING_PENDING_PAYMENT_TTL:-15m}
+      BOOKING_PAYMENT_EXPIRY_GRACE: ${BOOKING_PAYMENT_EXPIRY_GRACE:-15m}
     ports:
       - "${HTTP_PORT:-8080}:8080"
     volumes:
       - staticdata:/static/img
+
+  # Worker jobs (payment reconciliation, pending-payment expiry, dispute
+  # settlement, payout reconciliation). ExpirePendingPayments releases the slots
+  # of abandoned gateway payments after BOOKING_PENDING_PAYMENT_TTL plus
+  # BOOKING_PAYMENT_EXPIRY_GRACE (ADR 0017); without this service those slots
+  # stayed blocked until manual cleanup.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/worker"]
+    environment:
+      APP_ENV: development
+      APP_VERSION: 0.1.0
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-booker}
+      DB_PASSWORD: ${DB_PASSWORD:-changeme}
+      DB_NAME: ${DB_NAME:-bookings}
+      AUTH_ACCESS_TOKEN_SECRET: ${AUTH_ACCESS_TOKEN_SECRET}
+      DB_SSL_MODE: disable
+      DB_MAX_OPEN_CONNS: 25
+      DB_MAX_IDLE_CONNS: 5
+      DB_MAX_CONN_IDLE_TIME: 10m
+      DB_MAX_CONN_LIFETIME: 1h
+      LOG_LEVEL: debug
+      LOG_FORMAT: text
+      WORKER_INTERVAL_SECONDS: ${WORKER_INTERVAL_SECONDS:-300}
+      BOOKING_PENDING_PAYMENT_TTL: ${BOOKING_PENDING_PAYMENT_TTL:-15m}
+      BOOKING_PAYMENT_EXPIRY_GRACE: ${BOOKING_PAYMENT_EXPIRY_GRACE:-15m}
+      BOOKING_COMPLETION_DISPUTE_WINDOW: ${BOOKING_COMPLETION_DISPUTE_WINDOW:-72h}
+      PAYOUT_MIN_AMOUNT_IRR: ${PAYOUT_MIN_AMOUNT_IRR:-100000}
+      PAYMENT_ENVIRONMENT: ${PAYMENT_ENVIRONMENT:-sandbox}
+      ZARINPAL_MERCHANT_ID: ${ZARINPAL_MERCHANT_ID:-}
+      PAYMENT_CALLBACK_URL: ${PAYMENT_CALLBACK_URL:-}
+      PAYMENT_RETURN_URL: ${PAYMENT_RETURN_URL:-}
+      WORKER_ENABLED: ${WORKER_ENABLED:-true}
 
 volumes:
   dbdata:
